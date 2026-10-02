@@ -181,6 +181,10 @@ def test_protected_denied_however_written():
     case("denied: remote default branch found by ls-remote", "git push origin HEAD:develop",
          False, develop_default)
 
+    case("allowed: default branch from refs/remotes/origin/HEAD", "git push origin feat/x", True,
+         steps(add("a.txt", "ok\n"),
+               lambda r: r.git(r.work, "remote", "set-head", "origin", "main")))
+
 
 def test_rewrites_tags_deletions_denied():
     amended = steps(add("a.txt", "ok\n"), published,
@@ -248,6 +252,8 @@ def test_content():
          True, steps(add("a.md", "/home/alice/x\n"), published, add("b.md", "clean\n")))
     case("allowed: push by URL scans only what the remote lacks", "git push {remote} feat/x",
          True, steps(add("a.md", "/home/alice/x\n"), published, add("b.md", "clean\n")))
+    case("denied: secret after a NUL byte in a text diff", "git push origin feat/x", False,
+         steps(add("a.txt", "x" * 9000 + "\x00 tail\n"), add("b.txt", "ok\n", f"msg {TOKEN}")))
     case("denied: more commits than the cap", "git push origin feat/x", False,
          steps(add("a", "1\n"), add("b", "2\n"), add("c", "3\n")),
          extra={"CCGUARD_PUSH_GATE_MAX_COMMITS": "2"})

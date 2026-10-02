@@ -61,18 +61,24 @@ been resolved, so no shell parsing is involved. For pushes started by Claude Cod
 authors, added lines, file names (including renames and empty files) and the conflict
 resolutions of merge commits.
 
-**Keeping the gate in force — PreToolUse.** Matched on the whole command string, so wrappers
-do not hide them, ccguard denies `--no-verify` on a push, changing `core.hooksPath`,
-overriding `HOME`, `XDG_CONFIG_HOME` or `GIT_CONFIG_*` around a push, and `git send-pack`.
+**Keeping the gate in force — PreToolUse.** ccguard denies `--no-verify` on a git command,
+writing `core.hooksPath` (reading it is fine), clearing `CLAUDECODE` or the environment
+around git, overriding `HOME`, `XDG_CONFIG_HOME` or `GIT_CONFIG_*` around a push, a push
+through `sudo`, `git send-pack`, and writes to ccguard's hooks directory, config or plugin
+files (from Bash, and from the Edit/Write tools via `protect-files.py`). `bash -c`, `sh -c`
+and `eval` strings are checked like the command itself.
 
 **gh posts — PreToolUse.** gh has no hook, so the text it would post is checked before the
 command runs: titles, bodies, notes, comments and descriptions of
 `gh pr|issue|release|gist|repo|label|variable|project`, `gh api` fields, and the files and
 heredocs they read. Text that cannot be read first — stdin from a pipe, `$(...)`, backticks —
 is denied, as is a gh post wrapped in another command. The destination comes from `-R`,
-`GH_REPO`, the `gh api` endpoint or gist, else `origin`. `gh release create`, `gh repo sync`
-and `gh api` writes to refs, contents, merges and releases are denied: they change a
-repository the way a push would.
+`GH_REPO`, the `gh api` endpoint or gist, else `origin`. Command substitution is denied only
+where the shell would expand it (not inside single quotes), and
+`--body "$(cat <<'EOF' … EOF)"` is read from its heredoc. `gh release create`,
+`gh repo sync`, `gh alias set` and `gh api` writes to refs, contents, merges and releases
+(REST, or GraphQL ref and merge mutations) are denied: they change a repository the way a
+push would. `gh pr merge` is left to your permission rules — put it under `ask`.
 
 **Content patterns.** Secret shapes (private keys; GitHub, Anthropic, AWS and Slack tokens;
 raw 1Password item ids in `op://` references) block everywhere. Private identifiers block
@@ -93,8 +99,15 @@ message cannot spread the value it caught.
 - **Fails closed** for a push or a post: a git failure or timeout, more than 500 new commits
   (`CCGUARD_PUSH_GATE_MAX_COMMITS`), an invalid config or a crash of the gate is a denial.
   Other commands are never touched.
-- **Limits**: the PreToolUse checks read the Bash command string, so a `--no-verify` or a gh
-  post hidden in a script file is not seen. Keep the permission deny rules as a second layer.
+- **Threat model**: ccguard stops a cooperating agent's mistakes and shortcuts. It is not a
+  sandbox: an agent with a shell that is set on defeating it can (a script file that runs
+  `git push --no-verify`, for one). For a public repository, server-side branch protection
+  on the default branch and GitHub push protection are the real guarantee; keep them on,
+  and keep the permission deny rules as another layer.
+- **Side effects of a global `core.hooksPath`**: every git hook call starts a small shell
+  that looks for the repository's own hook, a few milliseconds each. The pre-commit
+  framework's `pre-commit install` refuses to run while `core.hooksPath` is set; a global
+  hooks directory you had before is replaced, not chained.
 
 ## Install
 
@@ -111,6 +124,7 @@ Via the marketplace:
 bash tests/test_block_ai_attribution.sh
 python3 tests/test_pre_push_gate.py
 python3 tests/test_push_gate.py
+python3 tests/test_protect_files.py
 ```
 
 Dependency-light: `jq` for `block-ai-attribution`; `python3` and `git` for the push gate.

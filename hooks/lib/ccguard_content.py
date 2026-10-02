@@ -13,6 +13,7 @@ printed, so a denial cannot spread the value it caught.
 import json
 import os
 import re
+import secrets
 import subprocess
 import time
 
@@ -136,12 +137,14 @@ def scan_commits(cwd, revs, target, patterns):
     if count > MAX_COMMITS:
         raise Deny(f"This push sends {count} commits, more than the {MAX_COMMITS} the gate "
                    "scans. Check them yourself and push by hand.")
+    # A random marker separates commits: a fixed byte such as NUL can occur in a diff.
+    mark = secrets.token_hex(16)
     log = git_must(cwd, ["log", "-p", "--no-color", "--no-ext-diff", "--diff-merges=remerge",
-                         "--format=%x00%h%n%an <%ae>%n%cn <%ce>%n%B%x00", *revs, "--"],
+                         f"--format={mark}%n%h%n%an <%ae>%n%cn <%ce>%n%B{mark}", *revs, "--"],
                    "read the commits to push")
-    parts = log.split("\x00")  # ["", header, diff, header, diff, ...]
+    parts = log.split(mark)  # ["", header, diff, header, diff, ...]
     for k in range(1, len(parts) - 1, 2):
-        lines = parts[k].split("\n")
+        lines = parts[k].strip("\n").split("\n")
         commit = lines[0]
         where = {"author or committer": "\n".join(lines[1:3]), "message": "\n".join(lines[3:])}
         for part, text in where.items():

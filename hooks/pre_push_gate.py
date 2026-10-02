@@ -41,7 +41,11 @@ def protected_branches(cwd, remote, url, configured):
         if head and "/" in head:
             default = head.split("/", 1)[1]
     if default is None and url:
-        listing = git_out(cwd, "ls-remote", "--symref", url, "HEAD") or ""
+        listing = git_out(cwd, "ls-remote", "--symref", url, "HEAD")
+        if listing is None:
+            raise Deny("Could not find the remote's default branch (`git ls-remote` failed), so "
+                       "the push cannot be checked. Run `git remote set-head <remote> --auto` "
+                       "or push by hand.")
         for line in listing.splitlines():
             if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
                 default = line[len("ref: refs/heads/"):-len("\tHEAD")]
@@ -66,7 +70,8 @@ def check(remote, url, lines):
             raise Deny(f"This push deletes `{remote_ref}`. Leave deletion to the user.")
         if remote_ref.startswith("refs/tags/"):
             raise Deny(f"This push creates or moves the tag `{remote_ref[10:]}`, which publishes "
-                       "a release. Leave tags to the release step.")
+                       "a release. Leave tags to the release step (with push.followTags, push "
+                       "with --no-follow-tags).")
         if not remote_ref.startswith("refs/heads/"):
             raise Deny(f"This push updates `{remote_ref}`, outside refs/heads/. Push a branch.")
         branch = remote_ref[len("refs/heads/"):]

@@ -3,25 +3,35 @@
 
 What a git push updates and sends is checked by the git pre-push gate
 (pre_push_gate.py, installed by install_git_hooks.py), which sees the refs
-git resolved, however the command was written. This hook only makes sure
-that gate runs:
+git resolved, however the command was written. This hook makes sure that
+gate runs:
 
-- denies taking hooks out of a push: `--no-verify` (or an abbreviation),
-  changing core.hooksPath, overriding HOME / XDG_CONFIG_HOME / GIT_CONFIG_*
-  around a push, and `git send-pack`. These are matched on the whole
-  command string, so `bash -c`, `eval` and the like do not hide them;
+- denies skipping hooks (`--no-verify` on a git command), writing
+  core.hooksPath (reading it is fine), clearing CLAUDECODE (the gate acts
+  only when it is 1) or the environment around git, overriding HOME /
+  XDG_CONFIG_HOME / GIT_CONFIG_* around a push, `git send-pack`, a push
+  through sudo, and writes to the ccguard hooks directory or config;
 - denies a git push from a repository where core.hooksPath does not point
   at the ccguard hooks directory (not set yet, or the repository sets its
   own).
 
 gh has no such hook, so its posts are checked here: titles, bodies, notes,
 comments, descriptions and fields of `gh pr|issue|release|gist|repo|label|
-variable|project|api`, and the files and heredocs they read, against the
-content patterns of lib/ccguard_content.py. Text that cannot be read before
-it is posted — stdin from a pipe, `$(...)` or backticks — is denied, as is a
-gh post wrapped in another command. `gh release create` (a tag), `gh repo
-sync`, and `gh api` writes to refs, contents, merges and releases are
-denied outright: they change a repository the way a push would.
+variable|project|api`, and the files, redirected files and heredocs they
+read, against the content patterns of lib/ccguard_content.py. Text the
+shell would produce by command substitution (`$(...)` or backticks outside
+single quotes) and stdin from a pipe cannot be read first and are denied;
+`--body "$(cat <<'EOF' ... EOF)"` is read from the heredoc. A gh post
+wrapped in another command is denied. `gh release create` (a tag),
+`gh repo sync`, `gh alias set`, and `gh api` writes to refs, contents,
+merges and releases (REST, or GraphQL ref and merge mutations) are denied:
+they change a repository the way a push would. `gh pr merge` is left to the
+permission rules (ask).
+
+`bash -c`, `sh -c` and `eval` strings are checked like the command itself.
+The guard is for a cooperating agent: it stops mistakes and shortcuts, not
+a determined attempt to defeat it. Server-side branch protection and push
+protection remain the real guarantee for a public repository.
 
 Fails closed: for a command that pushes or posts, anything that cannot be
 checked is denied. Other commands are never touched.
@@ -44,23 +54,28 @@ GIT_HOOKS = os.path.join(
     "ccguard", "git-hooks",
 )
 MAX_FILE = 20 << 20
+MAX_DEPTH = 3
 
 PUNCT = ";&|<>()\n"
 ASSIGN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", re.S)
 PREFIXES = {"!", "{", "}", "if", "then", "else", "elif", "do", "while", "until",
             "time", "command", "builtin", "nohup", "exec"}
+SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+SWITCH_USER = {"sudo", "doas", "su", "runuser", "pkexec"}
 HEREDOC = re.compile(r"(?<!<)<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+HEREDOC_CAT = re.compile(r"\$\(\s*cat\s+<<-?\s*['\"]?\w+['\"]?\s*\)\s*", re.S)
 
-PUSH = re.compile(r"\bpush\b")
 GIT = re.compile(r"\bgit\b")
-NO_VERIFY = re.compile(r"--no-v")
-HOOKS_PATH = re.compile(r"(\bconfig\b|(^|\s)-c\b|--config-env)[^\n]*hooks-?path", re.I)
+CLEARS_CLAUDECODE = re.compile(r"\bCLAUDECODE\s*=|-u\s*['\"]?CLAUDECODE\b|"
+                               r"\bunset\b[^\n;&|]*\bCLAUDECODE\b|"
+                               r"\benv\s+((-\S+|\w+=\S*)\s+)*(-i|--ignore-environment|-)(\s|$)")
 CONFIG_ENV = re.compile(r"\b(HOME|XDG_CONFIG_HOME|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|"
                         r"GIT_CONFIG_NOSYSTEM|GIT_CONFIG_PARAMETERS|GIT_CONFIG_COUNT|"
                         r"GIT_CONFIG_KEY_\d+|GIT_CONFIG_VALUE_\d+)=|"
                         r"(-u\s+|unset\s+)(HOME|XDG_CONFIG_HOME)\b")
-GH_WRAPPED = re.compile(r"(^|[\s;&|(`$'\"])gh\s+(pr|issue|release|gist|api|repo|label|"
-                        r"variable|project)\b")
+PROTECTED_PATHS = re.compile(r"ccguard/(git-hooks|push-gate\.json)|plugins/cache/[^/\s]+/ccguard/")
+WRITES = re.compile(r">|\b(tee|rm|rmdir|chmod|chown|mv|cp|ln|truncate|install|dd|unlink|shred)\b|"
+                    r"\b(sed|perl)\b[^\n]*\s-i|\b(python3?|perl|ruby|node)\b")
 
 
 # ------------------------------------------------------------------ parsing
@@ -85,6 +100,39 @@ def split_heredocs(command):
             bodies.append("\n".join(body))
             i = j + 1
     return "\n".join(kept), bodies
+
+
+def substitutions(text):
+    """Bodies of the command substitutions the shell would expand (not in single quotes)."""
+    out, i, quote, n = [], 0, None, len(text)
+    while i < n:
+        c = text[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+        elif c == "\\":
+            i += 2
+            continue
+        elif quote == '"' and c == '"':
+            quote = None
+        elif quote is None and c in "'\"":
+            quote = c
+        elif c == "`":
+            j = text.find("`", i + 1)
+            j = n if j < 0 else j
+            out.append(text[i + 1:j])
+            i = j + 1
+            continue
+        elif c == "$" and text.startswith("(", i + 1):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                depth += {"(": 1, ")": -1}.get(text[j], 0)
+                j += 1
+            out.append(text[i + 2:j - 1])
+            i = j
+            continue
+        i += 1
+    return out
 
 
 def segments(command):
@@ -145,34 +193,99 @@ def command_words(words):
     return assigns, words[i:]
 
 
+def split_git(words, cwd):
+    """(working dir, global options, subcommand, args) of a git invocation."""
+    opts, i = [], 1
+    while i < len(words):
+        w = words[i]
+        if w == "-C" and i + 1 < len(words):
+            cwd = os.path.join(cwd, os.path.expanduser(words[i + 1]))
+            i += 2
+        elif w in ("-c", "--git-dir", "--work-tree", "--namespace", "--config-env") and i + 1 < len(words):
+            opts += words[i:i + 2]
+            i += 2
+        elif w.startswith("-"):
+            opts.append(w)
+            i += 1
+        else:
+            return cwd, opts, w, words[i + 1:]
+    return cwd, opts, None, []
+
+
 # ---------------------------------------------------------------------- git
 
-def check_git(raw, parsed, cwd):
-    pushes = bool(GIT.search(raw) and PUSH.search(raw))
-    if NO_VERIFY.search(raw) and PUSH.search(raw):
-        raise Deny("`--no-verify` would skip the pre-push gate. Push without it.")
-    if GIT.search(raw) and HOOKS_PATH.search(raw):
-        raise Deny("This changes git's hooks path, which keeps the pre-push gate in force. "
-                   "That setting is the user's.")
-    if pushes and CONFIG_ENV.search(raw):
-        raise Deny("This push overrides HOME or git's config environment, which can take the "
-                   "pre-push gate out. Push without the override.")
-    if re.search(r"\bsend-pack\b", raw):
-        raise Deny("`git send-pack` pushes without running hooks. Use git push.")
-    if not pushes:
-        return
-    dirs = [cwd]
-    here = cwd
-    for words in parsed:
-        _assigns, cmd = command_words(words)
-        if not cmd:
+MESSAGE_VALUES = {"-m", "--message", "-F", "--file", "-C", "-c", "--reuse-message",
+                  "--reedit-message", "-t", "--template", "--fixup", "--squash"}
+CONFIG_WRITE_FLAGS = {"--unset", "--unset-all", "--add", "--replace-all", "--edit", "-e",
+                      "--rename-section", "--remove-section"}
+CONFIG_READ_FLAGS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l"}
+CONFIG_VALUE_OPTS = {"--file", "-f", "--blob", "--type", "--default", "--comment"}
+CONFIG_SUBCOMMANDS = {"get": False, "list": False, "set": True, "unset": True, "edit": True,
+                      "rename-section": True, "remove-section": True}
+
+
+def check_git(where, gopts, sub, args, pushes):
+    if any(re.search(r"hooks-?path", o, re.I) for o in gopts):
+        raise Deny("This sets git's hooks path for one command, which takes the pre-push gate "
+                   "out. That setting is the user's.")
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
             continue
-        if name_of(cmd[0]) == "cd" and len(cmd) > 1:
-            here = os.path.join(here, os.path.expanduser(cmd[1]))
-            dirs.append(here)
-        for k, w in enumerate(cmd[:-1]):
-            if name_of(w) == "git" and cmd[k + 1] == "-C" and k + 2 < len(cmd):
-                dirs.append(os.path.join(here, os.path.expanduser(cmd[k + 2])))
+        if a == "--":
+            break
+        if a in MESSAGE_VALUES:
+            skip = True
+            continue
+        if a.startswith("--no-v") and not a.startswith("--no-verbose"):
+            raise Deny("`--no-verify` skips git hooks, including the ccguard pre-push gate. "
+                       "Run the command without it.")
+    if sub == "config":
+        check_git_config(args)
+    elif sub == "send-pack":
+        raise Deny("`git send-pack` pushes without running hooks. Use git push.")
+    elif sub == "push" or is_push_alias(where, gopts, sub):
+        pushes.append(where)
+
+
+def is_push_alias(where, gopts, sub):
+    if not sub or not re.fullmatch(r"[A-Za-z0-9_.-]+", sub):
+        return False
+    for k in range(len(gopts) - 1):
+        if gopts[k] == "-c" and gopts[k + 1].lower().startswith(f"alias.{sub.lower()}="):
+            return "push" in gopts[k + 1]
+    alias = git_out(where, "config", "--get", f"alias.{sub}") if os.path.isdir(where) else None
+    return bool(alias and re.search(r"\bpush\b", alias))
+
+
+def check_git_config(args):
+    positional, flags, skip = [], set(), False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        name = a.split("=", 1)[0]
+        if name in CONFIG_VALUE_OPTS and "=" not in a:
+            skip = True
+        elif a.startswith("-"):
+            flags.add(name)
+        else:
+            positional.append(a)
+    keys = [k for k, p in enumerate(positional) if re.search(r"hooks-?path", p, re.I)]
+    if not keys:
+        return
+    if positional and positional[0] in CONFIG_SUBCOMMANDS:
+        write = CONFIG_SUBCOMMANDS[positional[0]]
+    else:
+        write = bool(flags & CONFIG_WRITE_FLAGS) or (
+            not flags & CONFIG_READ_FLAGS and len(positional) > keys[0] + 1)
+    if write:
+        raise Deny("This changes core.hooksPath, which keeps the pre-push gate in force. "
+                   "That setting is the user's.")
+
+
+def check_gate_active(dirs):
     target = os.path.realpath(GIT_HOOKS)
     for d in dict.fromkeys(dirs):
         if not os.path.isdir(d) or git_out(d, "rev-parse", "--is-inside-work-tree") is None:
@@ -180,8 +293,7 @@ def check_git(raw, parsed, cwd):
         value = git_out(d, "config", "--get", "core.hooksPath")
         if value and os.path.realpath(os.path.join(d, os.path.expanduser(value))) == target:
             continue
-        local = git_out(d, "config", "--local", "--get", "core.hooksPath")
-        if local:
+        if git_out(d, "config", "--local", "--get", "core.hooksPath"):
             raise Deny("This repository sets its own core.hooksPath, so the ccguard pre-push "
                        "gate does not run here. Ask the user to push by hand.")
         raise Deny("The ccguard pre-push gate is not active (core.hooksPath is not set to "
@@ -199,16 +311,33 @@ GH_TEXT = {"pr": {"create", "edit", "comment", "review", "close", "merge", "reop
            "label": {"create", "edit"},
            "variable": {"set"},
            "project": {"create", "edit", "item-create", "item-edit"},
+           "alias": {"set", "import"},
            "api": None}
-LONG_TEXT = {"--title", "--body", "--notes", "--subject", "--comment", "--description",
-             "--desc", "--message"}
-SHORT_TEXT = {"-t", "-b", "-n", "-c"}
-DESC_GROUPS = {"gist", "repo", "label"}  # -d is a description there, --draft/--delete elsewhere
+TEXT_FLAGS = {"pr": {"-t", "--title", "-b", "--body", "-c", "--comment", "--subject"},
+              "issue": {"-t", "--title", "-b", "--body", "-c", "--comment"},
+              "release": {"-t", "--title", "-n", "--notes"},
+              "gist": {"-d", "--desc"},
+              "repo": {"-d", "--description", "-h", "--homepage"},
+              "label": {"-d", "--description"},
+              "variable": {"-b", "--body"},
+              "project": {"--title", "--body", "-d", "--description", "--readme"},
+              "alias": set(),
+              "api": set()}
 FILE_FLAGS = {"--body-file", "--notes-file", "--input"}
+VALUE_FLAGS = {"-R", "--repo", "-B", "--base", "-H", "--head", "--header", "-l", "--label",
+               "-a", "--assignee", "-r", "--reviewer", "-m", "--milestone", "-p", "--project",
+               "-T", "--template", "-X", "--method", "-q", "--jq", "-t", "--hostname", "--cache",
+               "--preview", "-f", "--filename", "-c", "--color", "--target", "--owner",
+               "--format", "-A", "--author-email", "--match-head-commit", "--source", "--env"}
 API_TEXT = {"-f", "--raw-field"}
 API_FIELD = {"-F", "--field"}
 API_WRITES = re.compile(r"(^|/)repos/[^/]+/[^/]+/(git/|contents/|merges|branches/|releases|"
                         r"tags|pulls/\d+/merge|merge-upstream)")
+GRAPHQL_WRITES = re.compile(r"\b(createRef|updateRefs?|deleteRef|mergePullRequest|mergeBranch|"
+                            r"createCommitOnBranch|enablePullRequestAutoMerge|"
+                            r"updatePullRequestBranch)\b")
+GH_WRAPPED = re.compile(r"(^|[\s;&|(`$'\"])gh\s+(pr|issue|release|gist|api|repo|label|"
+                        r"variable|project|alias)\b")
 
 
 def gh_subcommand(args):
@@ -223,11 +352,7 @@ def gh_subcommand(args):
     return None
 
 
-def unreadable(value):
-    return "$(" in value or "`" in value
-
-
-def check_gh(cwd, args, inputs, bodies, assigns):
+def check_gh(cwd, args, inputs, bodies, assigns, substituted):
     sub = gh_subcommand(args)
     if not sub:
         return
@@ -237,6 +362,9 @@ def check_gh(cwd, args, inputs, bodies, assigns):
                    "to the user.")
     if (group, action) == ("repo", "sync"):
         raise Deny("`gh repo sync` updates a branch on the remote. Leave it to the user.")
+    if group == "alias":
+        raise Deny("`gh alias` defines commands this gate cannot see. Leave aliases to the user.")
+    text_flags = TEXT_FLAGS[group]
     texts, files, repo, endpoint, method, fields = [], list(inputs), None, None, None, False
     i = 1 if group == "api" else 2
     while i < len(args):
@@ -247,43 +375,49 @@ def check_gh(cwd, args, inputs, bodies, assigns):
             name, value, step = a[:2], a[2:], 1  # -bTEXT
         else:
             name, value, step = a, (args[i + 1] if i + 1 < len(args) else ""), 2
-        if name in ("-R", "--repo"):
-            repo = value
-        elif group == "api" and name in ("-X", "--method"):
-            method = value.upper()
-        elif group == "api" and name in API_TEXT | API_FIELD:
+        if group == "api" and name in API_TEXT | API_FIELD:
             fields = True
             field = value.partition("=")[2]
             if name in API_FIELD and field.startswith("@"):
                 files.append(field[1:])
             else:
                 texts.append((name, field))
+        elif name in text_flags:
+            texts.append((name, value))
         elif name in FILE_FLAGS or (name == "-F" and group != "api"):
             files.append(value)
-        elif name in LONG_TEXT or name in SHORT_TEXT or (name == "-d" and group in DESC_GROUPS):
-            texts.append((name, value))
+        elif name in VALUE_FLAGS:
+            if name in ("-R", "--repo"):
+                repo = value
+            elif name in ("-X", "--method"):
+                method = value.upper()
+            if step == 2 and value.startswith("-"):
+                step = 1  # a boolean spelled like a value flag (`gh pr merge -m -b ...`)
         elif a.startswith("-"):
             step = 1
         else:
-            if group == "api" and endpoint is None:
+            if group == "api" and endpoint is None and " " not in a:
                 endpoint = a
             elif group == "gist":
                 files.append(a)
             step = 1
         i += step
 
-    if group == "api" and API_WRITES.search(endpoint or "") and (fields or (method or "GET") != "GET"):
-        raise Deny("This `gh api` call changes refs, contents, merges or releases of a "
-                   "repository, the way a push would. Leave it to the user.")
+    if group == "api":
+        if API_WRITES.search(endpoint or "") and (fields or (method or "GET") != "GET"):
+            raise Deny("This `gh api` call changes refs, contents, merges or releases of a "
+                       "repository, the way a push would. Leave it to the user.")
     for where, value in texts + [("file", f) for f in files]:
-        if unreadable(value):
-            raise Deny(f"The {where} value of `gh {group}` is produced by a command "
-                       "substitution, which cannot be checked before it is posted. Write the "
-                       "text to a file and pass the file.")
+        if ("$(" in value or "`" in value) and not HEREDOC_CAT.fullmatch(value):
+            if any(s.strip() and s.strip() in value for s in substituted):
+                raise Deny(f"The {where} value of `gh {group}` comes from a command "
+                           "substitution, which cannot be checked before it is posted. Write "
+                           "the text to a file and pass the file.")
+    texts = [(w, v) for w, v in texts if not HEREDOC_CAT.fullmatch(v)]
     texts += [("heredoc", b) for b in bodies]
     for path in files:
         if path == "-":
-            if not bodies:
+            if not bodies and not inputs:
                 raise Deny(f"`gh {group}` would read its text from stdin, which cannot be "
                            "checked before it is posted. Write it to a file and pass the file.")
             continue
@@ -295,8 +429,12 @@ def check_gh(cwd, args, inputs, bodies, assigns):
                 texts.append((f"file {path}", f.read()))
         except OSError:
             raise Deny(f"Cannot read `{path}`, which `gh {group}` would post.") from None
+    if group == "api" and (endpoint or "").strip("/") == "graphql":
+        if any(re.search(r"\bmutation\b", t) and GRAPHQL_WRITES.search(t) for _, t in texts):
+            raise Deny("This GraphQL mutation changes refs or merges pull requests, the way a "
+                       "push would. Leave it to the user.")
 
-    repo = repo or assigns.get("GH_REPO")
+    repo = repo or assigns.get("GH_REPO") or os.environ.get("GH_REPO")
     m = re.match(r"/?repos/([^/{}]+)/([^/{}]+)", endpoint or "")
     if repo:
         destination = repo if repo.count("/") >= 2 else f"github.com/{repo}"
@@ -318,28 +456,66 @@ def check_gh(cwd, args, inputs, bodies, assigns):
 
 # --------------------------------------------------------------------- main
 
-def check(command, cwd):
+def check_raw(command):
+    if GIT.search(command) and CLEARS_CLAUDECODE.search(command):
+        raise Deny("This clears CLAUDECODE or the environment around git, which turns the "
+                   "pre-push gate off. Run git with the environment as it is.")
+    if PROTECTED_PATHS.search(command) and WRITES.search(command):
+        raise Deny("This would change ccguard's hooks, gate or config. Those are the user's "
+                   "to change.")
+
+
+def check(command, cwd, depth=0):
+    """Return the directories a push in `command` runs from; raise Deny."""
+    check_raw(command)
     stripped, bodies = split_heredocs(command)
-    parsed = list(segments(stripped))
-    check_git(command, [w for w, _ in parsed], cwd)
-    here = cwd
-    for words, inputs in parsed:
+    substituted = substitutions(stripped)
+    pushes, here = [], cwd
+    for words, inputs in segments(stripped):
         assigns, cmd = command_words(words)
         if not cmd:
             continue
         name = name_of(cmd[0])
         if name == "cd":
-            here = os.path.join(here, os.path.expanduser(cmd[1] if len(cmd) > 1 else "~"))
+            target = os.path.join(here, os.path.expanduser(cmd[1] if len(cmd) > 1 else "~"))
+            if os.path.isdir(target):  # `cd "$(...)"` and the like cannot be followed
+                here = target
+        elif name == "git":
+            where, gopts, sub, args = split_git(cmd, here)
+            before = len(pushes)
+            check_git(where, gopts, sub, args, pushes)
+            if len(pushes) > before and (CONFIG_ENV.search(" ".join(words)) or
+                                         any(k in assigns for k in ("HOME", "XDG_CONFIG_HOME"))):
+                raise Deny("This push overrides HOME or git's config environment, which can "
+                           "take the pre-push gate out. Push without the override.")
         elif name == "gh":
-            check_gh(here, cmd[1:], inputs, bodies, assigns)
-        elif any((name_of(w) == "gh" and gh_subcommand(cmd[k + 1:])) or GH_WRAPPED.search(w)
-                 for k, w in enumerate(cmd)):
-            raise Deny(f"A `gh` post runs inside `{cmd[0]}`, where the gate cannot check it. "
-                       "Run it as a plain command of its own.")
+            check_gh(here, cmd[1:], inputs, bodies, assigns, substituted)
+        elif name in SHELLS and "-c" in cmd[1:] and depth < MAX_DEPTH:
+            k = cmd.index("-c", 1)
+            if k + 1 < len(cmd):
+                pushes += check(cmd[k + 1], here, depth + 1)
+        elif name == "eval" and depth < MAX_DEPTH:
+            pushes += check(" ".join(cmd[1:]), here, depth + 1)
+        else:
+            names = [name_of(w) for w in cmd]
+            for k, n in enumerate(names):
+                if n == "git" and "push" in cmd[k + 1:]:
+                    if name in SWITCH_USER:
+                        raise Deny(f"A push through `{name}` runs without your git config, so "
+                                   "the pre-push gate does not run. Push as yourself.")
+                    pushes.append(here)
+                if (n == "gh" and gh_subcommand(cmd[k + 1:])) or GH_WRAPPED.search(cmd[k]):
+                    raise Deny(f"A `gh` post runs inside `{cmd[0]}`, where the gate cannot check "
+                               "it. Run it as a plain command of its own.")
+    if pushes and CONFIG_ENV.search(command):  # e.g. `export HOME=/tmp; git push`
+        raise Deny("This push overrides HOME or git's config environment, which can take the "
+                   "pre-push gate out. Push without the override.")
+    return pushes
 
 
 def relevant(command):
-    return GIT.search(command) or re.search(r"\bgh\b", command) or "send-pack" in command
+    return (GIT.search(command) or re.search(r"\bgh\b", command)
+            or PROTECTED_PATHS.search(command))
 
 
 def main():
@@ -353,12 +529,12 @@ def main():
         return 0
     set_budget(25)
     try:
-        check(command, cwd)
+        check_gate_active(check(command, cwd))
     except Deny as denial:
         print(f"BLOCKED (ccguard push-gate): {denial}", file=sys.stderr)
         return 2
     except Exception as e:  # noqa: BLE001
-        if (GIT.search(command) and PUSH.search(command)) or GH_WRAPPED.search(" " + command):
+        if (GIT.search(command) and re.search(r"\bpush\b", command)) or GH_WRAPPED.search(" " + command):
             reason = ("cannot be parsed (unbalanced quotes?)" if isinstance(e, ValueError)
                       else f"made the gate fail ({e.__class__.__name__})")
             print(f"BLOCKED (ccguard push-gate): this command {reason}. Run the push or post "
