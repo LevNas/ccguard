@@ -12,7 +12,7 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/push-gate.py\"",
-            "timeout": 30
+            "timeout": 60
           }
         ]
       }

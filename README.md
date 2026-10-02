@@ -31,20 +31,27 @@ Lets Claude push a feature branch without asking you, by deciding deterministica
 must never leave the machine. Human confirmation moves to where it matters: opening and
 merging the pull request.
 
-Denied:
+**Where a push goes is asked of git, not guessed.** The push is replayed as
+`git push --dry-run --porcelain`, which reports every ref it would update, whether the update
+is forced or a deletion, and the URL it goes to — through push.default, `@{push}`, globs and
+any refspec. Denied:
 
 | What | Why |
 |---|---|
-| `-f`, `--force`, `--force-with-lease`, `--force-if-includes`, `+refspec` | rewrites published history |
-| `:branch`, `--delete`, `-d`, `--prune` | removes remote refs |
-| `--all`, `--mirror`, `--tags`, `--follow-tags`, a tag refspec | publishes in bulk or releases |
-| a push to `main`, `master`, the remote's default branch, or `CCGUARD_PROTECTED_BRANCHES` (comma-separated) | changes go in through a reviewed merge |
-| a commit to be pushed, or `gh pr\|issue create\|edit\|comment` text, matching a content pattern | content cannot be unpublished |
+| a forced update: `-f`, `--force*`, `+refspec`, or any update git reports as forced | rewrites published history |
+| a deletion: `:branch`, `--delete`, `-d`, `--prune` | removes remote refs |
+| `--all`, `--branches`, `--mirror`, `--tags`, `--follow-tags`, a tag | publishes in bulk or releases |
+| any ref outside `refs/heads/` | not a branch |
+| `main`, `master`, the remote's default branch, `CCGUARD_PROTECTED_BRANCHES` (comma-separated) — even when the push would change nothing | changes go in through a reviewed merge |
+| `--recurse-submodules` other than `check`/`no` | pushes other repositories unchecked |
 
-A bare `git push` is resolved through `@{push}` (or the current branch), and `git -C <dir>`
-and a preceding `cd <dir>` are followed. `--dry-run` sends nothing and is never gated.
+`--dry-run` sends nothing and is never gated. The probe costs one round trip to the remote
+(about two seconds).
 
-**Content patterns.** Secret shapes (private keys; GitHub, Anthropic, AWS and Slack tokens;
+**Content.** Scanned are the commits the remote does not have yet — messages, authors, added
+lines, file names, and the conflict resolutions of merge commits — and the text `gh` would post:
+titles, bodies, notes and comments of `gh pr|issue|release|gist`, `gh api` fields, and the files
+and heredocs they read. Secret shapes (private keys; GitHub, Anthropic, AWS and Slack tokens;
 raw 1Password item ids in `op://` references) block everywhere. Private identifiers block
 except for remotes you mark as private:
 
@@ -56,16 +63,20 @@ except for remotes you mark as private:
 }
 ```
 
-`/home/<you>/` is always a private identifier. Patterns are case-insensitive regexes. Only the
-commits the remote does not have yet are scanned (up to 500). A denial names the commit, the
-part (message, author, or file) and the pattern number — never the matched text, so the
-message cannot spread the value it caught.
+`/home/<you>/` is always a private identifier. Patterns are case-insensitive regexes. A denial
+names the commit, the part (message, author, file name or line) and the pattern number —
+never the matched text, so the message cannot spread the value it caught.
 
-- **Fail-open**, except for a `git push` that cannot be parsed (denied: run it as a plain,
-  separate command).
-- **Scope and limits**: it reads the Bash *command string*. A push hidden inside
-  `bash -c "…"`, a script file or an alias is not seen; keep the permission deny rules as a
-  second layer.
+**Shell commands.** The command is split on newlines, `;`, `&&`, `||`, `|`, `&` and
+parentheses; redirections and heredoc bodies are taken apart, and `git -C <dir>` and a
+preceding `cd <dir>` are followed. A push or post wrapped in another command (`sudo`,
+`timeout`, `xargs`, …) is denied: run it as a plain command of its own.
+
+- **Fails closed** for a command that pushes or posts: an unparseable command, a git
+  failure or timeout, more than 500 new commits (`CCGUARD_PUSH_GATE_MAX_COMMITS`), or an
+  invalid config file is a denial. Other commands are never touched.
+- **Limits**: it reads the Bash *command string*. A push inside `bash -c "…"`, a script file
+  or an alias is not seen; keep the permission deny rules as a second layer.
 
 ## Install
 
