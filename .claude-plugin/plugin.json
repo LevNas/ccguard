@@ -1,7 +1,7 @@
 {
   "name": "ccguard",
-  "description": "Deterministic PreToolUse guards for Claude Code. The first guard blocks git commits that carry AI/assistant attribution or session metadata.",
-  "version": "0.1.0",
+  "description": "Deterministic PreToolUse guards for Claude Code: block git commits that carry AI/assistant attribution, and gate git push / gh pr|issue text (no force, no protected branches, no secrets or private identifiers).",
+  "version": "0.2.0",
   "author": {
     "name": "LevNas"
   },

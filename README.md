@@ -25,6 +25,48 @@ the trailer and commit again.
 - **Scope**: it inspects the *command string* of the Bash tool call, not file contents, so it only
   fires on actual `git commit` invocations.
 
+### `push-gate` (PreToolUse / Bash)
+
+Lets Claude push a feature branch without asking you, by deciding deterministically what
+must never leave the machine. Human confirmation moves to where it matters: opening and
+merging the pull request.
+
+Denied:
+
+| What | Why |
+|---|---|
+| `-f`, `--force`, `--force-with-lease`, `--force-if-includes`, `+refspec` | rewrites published history |
+| `:branch`, `--delete`, `-d`, `--prune` | removes remote refs |
+| `--all`, `--mirror`, `--tags`, `--follow-tags`, a tag refspec | publishes in bulk or releases |
+| a push to `main`, `master`, the remote's default branch, or `CCGUARD_PROTECTED_BRANCHES` (comma-separated) | changes go in through a reviewed merge |
+| a commit to be pushed, or `gh pr\|issue create\|edit\|comment` text, matching a content pattern | content cannot be unpublished |
+
+A bare `git push` is resolved through `@{push}` (or the current branch), and `git -C <dir>`
+and a preceding `cd <dir>` are followed. `--dry-run` sends nothing and is never gated.
+
+**Content patterns.** Secret shapes (private keys; GitHub, Anthropic, AWS and Slack tokens;
+raw 1Password item ids in `op://` references) block everywhere. Private identifiers block
+except for remotes you mark as private:
+
+```jsonc
+// ~/.config/ccguard/push-gate.json  (outside every repository; never commit it)
+{
+  "private_patterns": ["<a work handle>", "<a private repository name>"],
+  "skip_remotes": ["github\\.com[:/]<you>/<private-repo>"]
+}
+```
+
+`/home/<you>/` is always a private identifier. Patterns are case-insensitive regexes. Only the
+commits the remote does not have yet are scanned (up to 500). A denial names the commit, the
+part (message, author, or file) and the pattern number — never the matched text, so the
+message cannot spread the value it caught.
+
+- **Fail-open**, except for a `git push` that cannot be parsed (denied: run it as a plain,
+  separate command).
+- **Scope and limits**: it reads the Bash *command string*. A push hidden inside
+  `bash -c "…"`, a script file or an alias is not seen; keep the permission deny rules as a
+  second layer.
+
 ## Install
 
 Via the marketplace:
@@ -38,9 +80,10 @@ Via the marketplace:
 
 ```
 bash tests/test_block_ai_attribution.sh
+python3 tests/test_push_gate.py
 ```
 
-Dependency-light (needs `jq`, which the guard also requires).
+Dependency-light: `jq` for `block-ai-attribution`; `python3` and `git` for `push-gate`.
 
 ## License
 
