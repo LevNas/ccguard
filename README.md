@@ -25,35 +25,58 @@ the trailer and commit again.
 - **Scope**: it inspects the *command string* of the Bash tool call, not file contents, so it only
   fires on actual `git commit` invocations.
 
-### `push-gate` (PreToolUse / Bash)
+### Push gate (git pre-push + PreToolUse / Bash)
 
 Lets Claude push a feature branch without asking you, by deciding deterministically what
 must never leave the machine. Human confirmation moves to where it matters: opening and
 merging the pull request.
 
-**Where a push goes is asked of git, not guessed.** The push is replayed as
-`git push --dry-run --porcelain`, which reports every ref it would update, whether the update
-is forced or a deletion, and the URL it goes to — through push.default, `@{push}`, globs and
-any refspec. Denied:
+**Setup (once).** At session start ccguard writes its git hooks to
+`~/.local/share/ccguard/git-hooks` (`$XDG_DATA_HOME`), a path that survives plugin updates.
+Point git at it:
+
+```
+git config --global core.hooksPath ~/.local/share/ccguard/git-hooks
+```
+
+Every hook there first runs the repository's own hook (`.git/hooks/<name>`), so existing
+hooks keep working. Until this is set, ccguard denies Claude's pushes and says so at session
+start. A repository that sets its own `core.hooksPath` (husky, for example) does not get the
+gate, so Claude's pushes there are denied too.
+
+**What a push may update — the pre-push gate.** git calls `pre-push` with the refs it is about
+to update, after every alias, wrapper (`bash -c`, `eval`), refspec, glob and push.default has
+been resolved, so no shell parsing is involved. For pushes started by Claude Code
+(`CLAUDECODE=1`; your own pushes are not touched) it denies:
 
 | What | Why |
 |---|---|
-| a forced update: `-f`, `--force*`, `+refspec`, or any update git reports as forced | rewrites published history |
-| a deletion: `:branch`, `--delete`, `-d`, `--prune` | removes remote refs |
-| `--all`, `--branches`, `--mirror`, `--tags`, `--follow-tags`, a tag | publishes in bulk or releases |
+| a forced (non-fast-forward) update, however requested | rewrites published history |
+| a deletion | removes remote refs |
+| a tag | publishes a release |
 | any ref outside `refs/heads/` | not a branch |
-| `main`, `master`, the remote's default branch, `CCGUARD_PROTECTED_BRANCHES` (comma-separated) — even when the push would change nothing | changes go in through a reviewed merge |
-| `--recurse-submodules` other than `check`/`no` | pushes other repositories unchecked |
+| `main`, `master`, the remote's default branch, `CCGUARD_PROTECTED_BRANCHES` (comma-separated) | changes go in through a reviewed merge |
 
-`--dry-run` sends nothing and is never gated. The probe costs one round trip to the remote
-(about two seconds).
+**What a push may send.** The commits the remote does not have yet are scanned: messages,
+authors, added lines, file names (including renames and empty files) and the conflict
+resolutions of merge commits.
 
-**Content.** Scanned are the commits the remote does not have yet — messages, authors, added
-lines, file names, and the conflict resolutions of merge commits — and the text `gh` would post:
-titles, bodies, notes and comments of `gh pr|issue|release|gist`, `gh api` fields, and the files
-and heredocs they read. Secret shapes (private keys; GitHub, Anthropic, AWS and Slack tokens;
+**Keeping the gate in force — PreToolUse.** Matched on the whole command string, so wrappers
+do not hide them, ccguard denies `--no-verify` on a push, changing `core.hooksPath`,
+overriding `HOME`, `XDG_CONFIG_HOME` or `GIT_CONFIG_*` around a push, and `git send-pack`.
+
+**gh posts — PreToolUse.** gh has no hook, so the text it would post is checked before the
+command runs: titles, bodies, notes, comments and descriptions of
+`gh pr|issue|release|gist|repo|label|variable|project`, `gh api` fields, and the files and
+heredocs they read. Text that cannot be read first — stdin from a pipe, `$(...)`, backticks —
+is denied, as is a gh post wrapped in another command. The destination comes from `-R`,
+`GH_REPO`, the `gh api` endpoint or gist, else `origin`. `gh release create`, `gh repo sync`
+and `gh api` writes to refs, contents, merges and releases are denied: they change a
+repository the way a push would.
+
+**Content patterns.** Secret shapes (private keys; GitHub, Anthropic, AWS and Slack tokens;
 raw 1Password item ids in `op://` references) block everywhere. Private identifiers block
-except for remotes you mark as private:
+except for destinations you mark as private:
 
 ```jsonc
 // ~/.config/ccguard/push-gate.json  (outside every repository; never commit it)
@@ -64,19 +87,14 @@ except for remotes you mark as private:
 ```
 
 `/home/<you>/` is always a private identifier. Patterns are case-insensitive regexes. A denial
-names the commit, the part (message, author, file name or line) and the pattern number —
-never the matched text, so the message cannot spread the value it caught.
+names the commit or option, the part and the pattern number — never the matched text, so the
+message cannot spread the value it caught.
 
-**Shell commands.** The command is split on newlines, `;`, `&&`, `||`, `|`, `&` and
-parentheses; redirections and heredoc bodies are taken apart, and `git -C <dir>` and a
-preceding `cd <dir>` are followed. A push or post wrapped in another command (`sudo`,
-`timeout`, `xargs`, …) is denied: run it as a plain command of its own.
-
-- **Fails closed** for a command that pushes or posts: an unparseable command, a git
-  failure or timeout, more than 500 new commits (`CCGUARD_PUSH_GATE_MAX_COMMITS`), or an
-  invalid config file is a denial. Other commands are never touched.
-- **Limits**: it reads the Bash *command string*. A push inside `bash -c "…"`, a script file
-  or an alias is not seen; keep the permission deny rules as a second layer.
+- **Fails closed** for a push or a post: a git failure or timeout, more than 500 new commits
+  (`CCGUARD_PUSH_GATE_MAX_COMMITS`), an invalid config or a crash of the gate is a denial.
+  Other commands are never touched.
+- **Limits**: the PreToolUse checks read the Bash command string, so a `--no-verify` or a gh
+  post hidden in a script file is not seen. Keep the permission deny rules as a second layer.
 
 ## Install
 
@@ -91,10 +109,11 @@ Via the marketplace:
 
 ```
 bash tests/test_block_ai_attribution.sh
+python3 tests/test_pre_push_gate.py
 python3 tests/test_push_gate.py
 ```
 
-Dependency-light: `jq` for `block-ai-attribution`; `python3` and `git` for `push-gate`.
+Dependency-light: `jq` for `block-ai-attribution`; `python3` and `git` for the push gate.
 
 ## License
 

@@ -5,31 +5,37 @@ All notable changes to this project will be documented in this file.
 ## [0.2.0] - 2026-10-03
 
 ### Added
-- **`push-gate`** (PreToolUse / Bash, `hooks/push-gate.py`): lets a push to a feature branch
-  run without human confirmation by deciding deterministically what must never leave the
-  machine.
-  - Destinations are resolved by replaying the push as `git push --dry-run --porcelain`.
-    Denied: forced updates, deletions, tags, refs outside `refs/heads/`, and `main`,
-    `master`, the remote's default branch or `CCGUARD_PROTECTED_BRANCHES` (even a no-op
-    push to them); also `--all`, `--branches`, `--mirror`, `--tags`, `--follow-tags`,
-    `--force*`, `-f`, `-d`, `+refspec`, `:ref` and `--recurse-submodules=on-demand` on
-    the command line.
-  - Content: the commits the remote does not have yet (messages, authors, added lines,
-    file names, merge conflict resolutions via `--diff-merges=remerge`) and the text `gh`
-    would post (`gh pr|issue|release|gist` titles, bodies, notes, comments; `gh api`
-    fields; the files and heredocs they read). Secret shapes block everywhere; private
-    identifiers (`/home/<you>/` plus the regexes in `~/.config/ccguard/push-gate.json`)
-    block except for its `skip_remotes`. Denials report the location and pattern number,
-    never the matched text.
-  - Shell parsing: newlines, `;`, `&&`, `||`, `|`, `&` and parentheses split commands;
-    redirections and heredoc bodies are taken apart; a push or post wrapped in another
-    command (`sudo`, `timeout`, `xargs`, ...) is denied.
-  - Fails closed for commands that push or post: an unparseable command, a git failure or
-    timeout, more than 500 new commits (`CCGUARD_PUSH_GATE_MAX_COMMITS`), or an invalid
-    config is a denial. `--dry-run` is never gated.
-- `tests/test_push_gate.py`: 80 checks against throwaway repositories with a bare remote,
-  including the multi-line, heredoc, redirection, wrapper, glob-refspec, push.default,
-  merge-resolution and commit-cap cases; token-shaped samples are assembled at runtime.
+- **Push gate**: lets a push to a feature branch run without human confirmation by
+  deciding deterministically what must never leave the machine.
+  - `hooks/pre_push_gate.py` (git `pre-push`, only when `CLAUDECODE=1`): denies forced
+    (non-fast-forward) updates, deletions, tags, refs outside `refs/heads/`, and `main`,
+    `master`, the remote's default branch (`refs/remotes/<remote>/HEAD`, else
+    `ls-remote --symref`) or `CCGUARD_PROTECTED_BRANCHES`. Scans the commits the remote
+    lacks: messages, authors, added lines, file names (renames and empty files included)
+    and merge conflict resolutions (`--diff-merges=remerge`). git resolves aliases,
+    wrappers, refspecs and push.default before calling the hook, so no shell parsing is
+    involved.
+  - `hooks/install_git_hooks.py` (SessionStart): writes the hooks to
+    `~/.local/share/ccguard/git-hooks`, a path that survives plugin updates; every hook
+    first runs the repository's own. Tells the session when `core.hooksPath` is not set
+    (setting it is left to the user).
+  - `hooks/push-gate.py` (PreToolUse / Bash): keeps the gate in force (denies
+    `--no-verify` on a push, changing `core.hooksPath`, `HOME`/`XDG_CONFIG_HOME`/
+    `GIT_CONFIG_*` overrides around a push, `git send-pack`, and pushes where the gate is
+    not active) and checks the text gh would post (`pr|issue|release|gist|repo|label|
+    variable|project`, `gh api` fields, files and heredocs). Unreadable text (stdin from a
+    pipe, `$(...)`, backticks) and wrapped gh posts are denied; `gh release create`,
+    `gh repo sync` and `gh api` writes to refs, contents, merges and releases are denied.
+  - `hooks/lib/ccguard_content.py`: content patterns shared by both gates. Secret shapes
+    block everywhere; private identifiers (`/home/<you>/` plus the regexes in
+    `~/.config/ccguard/push-gate.json`) block except for its `skip_remotes`. Denials report
+    the location and pattern number, never the matched text.
+  - Fails closed for pushes and posts: git failures, timeouts, more than 500 new commits
+    (`CCGUARD_PUSH_GATE_MAX_COMMITS`), an invalid config or a crash deny.
+- Tests: `tests/test_pre_push_gate.py` runs real `git push` commands against a bare remote
+  (wrapped, continued, aliased, globbed and forced pushes; content cases; hook chaining;
+  the installer); `tests/test_push_gate.py` covers the PreToolUse checks.
+  Token-shaped samples are assembled at runtime.
 
 ## [0.1.0] - 2026-06-23
 
