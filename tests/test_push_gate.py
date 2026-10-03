@@ -141,6 +141,119 @@ def test_gate_cannot_be_taken_out():
     case("allowed: env with a rebase", "env X=1 git rebase -i HEAD~1", 0)
 
 
+HOOKS = "~/.local/share/ccguard/git-hooks"
+CONFIG = "~/.config/ccguard/push-gate.json"
+
+
+def test_own_files_raw_check():
+    # Writes to ccguard's own files stay denied however they are wrapped: the check
+    # reads the raw text, only with data heredocs and fd duplications set aside.
+    for cmd in (f"echo {HOOKS}/pre-push | xargs rm",
+                f"echo x > $(echo {CONFIG})",
+                f"f={CONFIG}; echo x > \"$f\"",
+                f"echo x >> {HOOKS}/pre-push",
+                f"echo x >| {CONFIG}",
+                f"echo x &> {CONFIG}",
+                f"ls {HOOKS} 2>&1 > {HOOKS}/pre-push",
+                f"echo x | tee {CONFIG}",
+                f"find {HOOKS} -delete -exec rm {{}} +",
+                f"python3 -c \"open('{CONFIG}', 'w')\"",
+                f"bash <<'EOF'\nrm -f {HOOKS}/pre-push\nEOF",
+                f"cat <<'EOF' | sh\necho x > {CONFIG}\nEOF",
+                f"cat <<'EOF' > /tmp/x.sh\nrm -f {HOOKS}/pre-push\nEOF\nbash /tmp/x.sh",
+                f"xargs rm <<'EOF'\n{HOOKS}/pre-push\nEOF",
+                f"rm -f {HOOKS}/pre-push '",
+                # relative targets after cd
+                f"cd {HOOKS} && : > pre-push",
+                f"cd {HOOKS} && printf '' >pre-push",
+                # a quoted or commented `<<X` must not hide the lines after it
+                f"echo '<<X'\nrm -f {HOOKS}/pre-push\nX",
+                f"echo hi # <<X\nrm -f {HOOKS}/pre-push\nX",
+                # heredoc readers that no word list can name
+                f"$SHELL <<'EOF'\nrm -f {HOOKS}/pre-push\nEOF",
+                f"ed <<'EOF'\ne {CONFIG}\n1d\nw\nEOF",
+                f"cat > /tmp/x <<'EOF'\n#!/bin/sh\nrm -f {HOOKS}/pre-push\nEOF\n"
+                "chmod +x /tmp/x; /tmp/x",
+                # writers and flag spellings
+                f"sed --in-place s/a/b/ {CONFIG}",
+                f"sed -Ei s/a/b/ {CONFIG}",
+                f"curl -o {CONFIG} https://example.com/x",
+                f"touch {HOOKS}/pre-push",
+                f"patch {CONFIG} /tmp/p.diff",
+                # targets spelled around the literal pattern
+                f"cat {CONFIG} > ~/.config/ccguard/./push-gate.json",
+                f"cat {CONFIG} > /home/u/.config/ccguard//push-gate.json",
+                f"echo x > \"/home/u/.config/ccguard/push-gate.json\"",
+                # absolute spellings of the cwd or an open fd, and `..`
+                f"cd {HOOKS} && echo x > /proc/self/cwd/pre-push",
+                f"cd {HOOKS} && echo x > /proc/1234/cwd/pre-push",
+                f"exec 3< {HOOKS}; echo x > /dev/fd/3/pre-push",
+                f"cd {HOOKS} && echo x > /tmp/../proc/self/cwd/pre-push",
+                f"cd {HOOKS} && echo x > //proc/self/cwd/pre-push",
+                f"cd {HOOKS} && echo x > /./proc/self/cwd/pre-push",
+                f"exec 3< {HOOKS}; echo x > /./dev/fd/3/pre-push",
+                f"cd {HOOKS} && echo x > /tmp/./../proc/self/cwd/pre-push",
+                # /dev/stdout and /dev/stderr reopen fd 1 and 2, which may point at a file
+                f"exec 1< {CONFIG}; echo x >/dev/stdout",
+                f"exec 2< {CONFIG}; echo x >/dev/stderr",
+                f"ls {HOOKS}; echo x > /home/u/notes.txt",
+                # `>&1:` is a file name to bash, not an fd duplication
+                f"cd {HOOKS} && echo x >&1:",
+                # a protected path split by a line continuation is still one word
+                "echo x > ~/.config/ccguard/push-\\\ngate.json"):
+        case(f"denied: {cmd!r}", cmd, 2)
+
+    def link_into_hooks(repo):
+        os.makedirs(repo.hooks_dir, exist_ok=True)
+        os.symlink(repo.hooks_dir, os.path.join(repo.work, "lnk"))
+    case("denied: write through a symlink into the hooks directory",
+         f"ls {HOOKS}; echo x > {{work}}/lnk/pre-push", 2, link_into_hooks)
+
+    def link_out_of_tmp(repo):
+        os.symlink("/", os.path.join(repo.work, "root"))
+    case("denied: write through a symlink that leads out of /tmp",
+         f"ls {HOOKS}; echo x > {{work}}/root/var/x", 2, link_out_of_tmp)
+    # Writers no list names, hidden by an exemption for `>`: any `>` stays a write.
+    for cmd in (f"git config --file {CONFIG} a.b c 2>/dev/null",
+                f"echo X | sort -o {CONFIG} 2>/dev/null",
+                f"echo hi | sed -n 'w {CONFIG}' >/dev/null",
+                f"mkdir {HOOKS}/evil 2>/dev/null",
+                f"link {CONFIG} /tmp/lk; echo x > /tmp/lk",
+                f"l\"\"n -s {CONFIG} /tmp/lk; echo x > /tmp/lk",
+                f"l\"\"n -s {CONFIG} /tmp/zz_lk1; echo x >/tmp/zz_lk1>&1",
+                # Known false positives: a read that carries a redirect. Use the Read tool,
+                # or drop the redirect.
+                f"ls -la {HOOKS}/ 2>&1",
+                f"ls {HOOKS} >/dev/null 2>&1 && echo present",
+                f"cat {CONFIG} > /tmp/copy.json"):
+        case(f"denied: {cmd!r}", cmd, 2)
+    # Reading them without a redirect is not a write.
+    for cmd in (f"ls -la {HOOKS}/",
+                f"cat {HOOKS}/pre-push | head -5",
+                f"wc -l {HOOKS}/pre-push",
+                f"grep -n gate {HOOKS}/pre-push | head"):
+        case(f"allowed: {cmd!r}", cmd, 0)
+
+
+def test_claudecode_stays_set():
+    # The pre-push gate acts only when CLAUDECODE=1, however the change is wrapped.
+    for cmd in ("xargs sh -c 'CLAUDECODE= git push origin feat'",
+                "timeout 5 sh -c 'CLAUDECODE= git push origin feat'",
+                "find . -maxdepth 0 -exec sh -c 'CLAUDECODE= git push origin feat' \\;",
+                "echo `CLAUDECODE= git push origin feat`",
+                "CLAUDECODE+=x git push origin feat",
+                "export -n CLAUDECODE; git push origin feat",
+                "declare +x CLAUDECODE; git push origin feat",
+                "read CLAUDECODE </dev/null; git push origin feat",
+                "printf -v CLAUDECODE 0; git push origin feat",
+                "mapfile CLAUDECODE </dev/null; git push origin feat",
+                "for CLAUDECODE in 0; do git push origin feat; done",
+                "export -n \\\nCLAUDECODE; git push origin feat",
+                "unset \\\nCLAUDECODE; git push origin feat",
+                "export -n 'a;b' CLAUDECODE; git push origin feat"):
+        case(f"denied: {cmd!r}", cmd, 2)
+
+
 # ----------------------------------------------------------------------- gh
 
 def gh_setup(body="", skip=()):

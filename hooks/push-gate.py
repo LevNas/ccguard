@@ -66,16 +66,25 @@ HEREDOC = re.compile(r"(?<!<)<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 HEREDOC_CAT = re.compile(r"\$\(\s*cat\s+<<-?\s*['\"]?\w+['\"]?\s*\)\s*", re.S)
 
 GIT = re.compile(r"\bgit\b")
-CLEARS_CLAUDECODE = re.compile(r"\bCLAUDECODE\s*=|-u\s*['\"]?CLAUDECODE\b|"
-                               r"\bunset\b[^\n;&|]*\bCLAUDECODE\b|"
+CLEARS_CLAUDECODE = re.compile(r"\bCLAUDECODE\s*\+?=|-u\s*['\"]?CLAUDECODE\b|"
+                               r"\b(unset|export|declare|typeset|readonly|local|read|mapfile|"
+                               r"readarray|for|printf)\b[^\n]*\bCLAUDECODE\b|"
                                r"\benv\s+((-\S+|\w+=\S*)\s+)*(-i|--ignore-environment|-)(\s|$)")
 CONFIG_ENV = re.compile(r"\b(HOME|XDG_CONFIG_HOME|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|"
                         r"GIT_CONFIG_NOSYSTEM|GIT_CONFIG_PARAMETERS|GIT_CONFIG_COUNT|"
                         r"GIT_CONFIG_KEY_\d+|GIT_CONFIG_VALUE_\d+)=|"
                         r"(-u\s+|unset\s+)(HOME|XDG_CONFIG_HOME)\b")
 PROTECTED_PATHS = re.compile(r"ccguard/(git-hooks|push-gate\.json)|plugins/cache/[^/\s]+/ccguard/")
-WRITES = re.compile(r">|\b(tee|rm|rmdir|chmod|chown|mv|cp|ln|truncate|install|dd|unlink|shred)\b|"
-                    r"\b(sed|perl)\b[^\n]*\s-i|\b(python3?|perl|ruby|node)\b")
+# Any `>` counts as a write next to a protected path. That rule also covers writers no
+# list names (`git config --file`, `sort -o`, `sed w`, ...); every exemption tried for it
+# (`2>&1`, `/dev/null`, `/tmp` targets) let such writers through in review. The words
+# below catch writes that need no `>`.
+WRITES = re.compile(r">|\b(tee|rm|rmdir|mkdir|chmod|chown|mv|cp|ln|link|truncate|install|dd|"
+                    r"unlink|shred|touch|patch|ed|ex|vi|vim|nvim|curl|wget|rsync|scp|tar|unzip|"
+                    r"cpio|sponge|awk|gawk|python3?|perl|ruby|node|php|lua|tclsh)\b|"
+                    r"\bsed\b[^\n]*\s(-[a-zA-Z]*i|--in-place)|\bsort\b[^\n]*\s-o|"
+                    r"\bfind\b[^\n]*\s-(delete|exec|execdir|ok|okdir|fprint\w*|fls)\b|"
+                    r"\bgit\b[^\n]*\s(apply|am|config)\b")
 
 
 # ------------------------------------------------------------------ parsing
@@ -457,10 +466,12 @@ def check_gh(cwd, args, inputs, bodies, assigns, substituted):
 # --------------------------------------------------------------------- main
 
 def check_raw(command):
-    if GIT.search(command) and CLEARS_CLAUDECODE.search(command):
+    """Checks on the raw text (heredoc bodies included), so that no wrapper hides them."""
+    joined = command.replace("\\\n", "")
+    if GIT.search(joined) and CLEARS_CLAUDECODE.search(joined):
         raise Deny("This clears CLAUDECODE or the environment around git, which turns the "
                    "pre-push gate off. Run git with the environment as it is.")
-    if PROTECTED_PATHS.search(command) and WRITES.search(command):
+    if PROTECTED_PATHS.search(joined) and WRITES.search(joined):
         raise Deny("This would change ccguard's hooks, gate or config. Those are the user's "
                    "to change.")
 
@@ -514,8 +525,9 @@ def check(command, cwd, depth=0):
 
 
 def relevant(command):
-    return (GIT.search(command) or re.search(r"\bgh\b", command)
-            or PROTECTED_PATHS.search(command))
+    joined = command.replace("\\\n", "")  # `push-\<newline>gate.json` is one word to bash
+    return (GIT.search(joined) or re.search(r"\bgh\b", joined)
+            or PROTECTED_PATHS.search(joined))
 
 
 def main():

@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] - 2026-10-03
+
+This release only tightens checks. Every command 0.2.0 denied is still denied (checked
+against about 720 commands run through both versions).
+
+### Fixed
+- **push-gate: more ways to turn the pre-push gate off are denied next to git**:
+  `CLAUDECODE+=x` (the gate needs exactly `1`), `export -n`, `declare +x`, `read`,
+  `mapfile`, `printf -v` and `for CLAUDECODE in ...`, and `unset` or `export` split by a
+  line continuation or a quoted `;`. The list is not complete: a name built at run time
+  (`N=CLAUDECODE; unset $N`, `"CLAUDE""CODE"`) still goes through, as in 0.2.0.
+- **push-gate: more writers count as writes next to ccguard's paths** when the command
+  has no `>`: `mkdir`, `link`, `touch`, `patch`, `ed`/`ex`/`vi`, `curl`, `wget`,
+  `rsync`, `scp`, `tar`, `unzip`, `cpio`, `sponge`, `awk`, `php`, `lua`, `tclsh`,
+  `sort -o`, `git apply`/`am`/`config`, and `sed` with `--in-place` or combined flags
+  (`-Ei`).
+- **push-gate: a protected path split by a line continuation was not checked**; the
+  joined text is now used both to decide whether to check and in the checks.
+
+### Known
+- **Reading ccguard's files with any redirect is denied** (#2): `ls <hooks dir> 2>&1`,
+  `cat <config> > /tmp/copy`, a commit message written with `cat > "$F" <<'EOF'` that
+  names the hooks path. Use the Read and Write tools, or drop the redirect. Exempting
+  some `>` targets (fd duplications, `/dev/null`, `/tmp`, heredoc bodies as data) was
+  tried in this release and dropped after three reviews: "any `>` is a write" also
+  covers writers no list names (`git config --file`, `sort -o`, `sed w`, a link made
+  first), and each exemption let one of them through.
+- A quoted label such as `echo "CLAUDECODE=$CLAUDECODE"`, `export CLAUDECODE`, or a commit
+  message that mentions `CLAUDECODE` after a word such as `read` or `export`, next to git,
+  is denied. The check stays on the raw text so that wrappers the parser does not follow
+  (`xargs sh -c`, `timeout sh -c`, `find -exec sh -c`) cannot hide a change.
+- Writers that need neither `>` nor a listed word, and a protected path split across
+  words (`cd ~/.local/share/ccguard; rm git-hooks/pre-push`), go through, as in 0.2.0.
+  The guard stops mistakes of a cooperating agent; it is not a sandbox.
+
 ## [0.2.0] - 2026-10-03
 
 ### Added
