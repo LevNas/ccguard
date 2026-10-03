@@ -81,10 +81,13 @@ WRITE_WORDS = re.compile(r"\b(tee|rm|rmdir|chmod|chown|mv|cp|ln|truncate|install
                          r"\bsed\b[^\n]*\s(-[a-zA-Z]*i|--in-place)|"
                          r"\bfind\b[^\n]*\s-(delete|exec|execdir|ok|okdir|fprint\w*|fls)\b|"
                          r"\bgit\b[^\n]*\s(apply|am)\b")
-FD_DUP = re.compile(r"\d*[<>]&(\d+|-)(?![\w/.~$])")
+FD_DUP = re.compile(r"\d*[<>]&(\d+|-)(?=[\s;|&)<>]|$)")
 REDIRECT = re.compile(r">>?\|?\s*(\S*)")
-# A redirect target that is certainly not one of ccguard's files: a plain absolute path.
+# A redirect target that is certainly not one of ccguard's files: a plain absolute path
+# with no `..`, outside /proc and /dev (/proc/self/cwd and /dev/fd/N resolve to the shell's
+# cwd or an open fd), whose resolved form does not reach ccguard either (see safe_target).
 SAFE_TARGET = re.compile(r"/[\w./+@%:,=-]*")
+SAFE_DEVICES = {"/dev/null", "/dev/stdout", "/dev/stderr"}
 
 
 # ------------------------------------------------------------------ parsing
@@ -465,17 +468,26 @@ def check_gh(cwd, args, inputs, bodies, assigns, substituted):
 
 # --------------------------------------------------------------------- main
 
+def safe_target(target):
+    """Whether a `>` target is certainly not one of ccguard's files.
+
+    A relative target may sit in a protected directory after `cd`; `$`, quotes and globs
+    cannot be resolved here; /proc/self/cwd and /dev/fd/N stand for the shell's cwd or an
+    open fd; a symlink may lead into ccguard's directories."""
+    if target in SAFE_DEVICES:
+        return True
+    if not SAFE_TARGET.fullmatch(target) or ".." in target.split("/"):
+        return False
+    if target.startswith(("/proc/", "/dev/")) or "ccguard" in target.lower():
+        return False
+    return "ccguard" not in os.path.realpath(target).lower()
+
+
 def writes_somewhere(text):
-    """Whether text may write a file: a write command, or a `>` to anything but a plain
-    absolute path outside ccguard (a relative target may sit in a protected directory
-    after `cd`, and `$`, quotes or globs cannot be resolved here)."""
+    """Whether text may write a file: a write command, or a `>` to anything but a safe target."""
     if WRITE_WORDS.search(text):
         return True
-    for m in REDIRECT.finditer(text):
-        target = m.group(1)
-        if not SAFE_TARGET.fullmatch(target) or "ccguard" in target.lower():
-            return True
-    return False
+    return any(not safe_target(m.group(1)) for m in REDIRECT.finditer(text))
 
 
 def check_raw(command):
@@ -539,8 +551,9 @@ def check(command, cwd, depth=0):
 
 
 def relevant(command):
-    return (GIT.search(command) or re.search(r"\bgh\b", command)
-            or PROTECTED_PATHS.search(command))
+    joined = command.replace("\\\n", "")  # `push-\<newline>gate.json` is one word to bash
+    return (GIT.search(joined) or re.search(r"\bgh\b", joined)
+            or PROTECTED_PATHS.search(joined))
 
 
 def main():

@@ -183,8 +183,23 @@ def test_own_files_raw_check():
                 # targets spelled around the literal pattern
                 f"cat {CONFIG} > ~/.config/ccguard/./push-gate.json",
                 f"cat {CONFIG} > /home/u/.config/ccguard//push-gate.json",
-                f"echo x > \"/home/u/.config/ccguard/push-gate.json\""):
+                f"echo x > \"/home/u/.config/ccguard/push-gate.json\"",
+                # absolute spellings of the cwd or an open fd, and `..`
+                f"cd {HOOKS} && echo x > /proc/self/cwd/pre-push",
+                f"cd {HOOKS} && echo x > /proc/1234/cwd/pre-push",
+                f"exec 3< {HOOKS}; echo x > /dev/fd/3/pre-push",
+                f"cd {HOOKS} && echo x > /tmp/../proc/self/cwd/pre-push",
+                # `>&1:` is a file name to bash, not an fd duplication
+                f"cd {HOOKS} && echo x >&1:",
+                # a protected path split by a line continuation is still one word
+                "echo x > ~/.config/ccguard/push-\\\ngate.json"):
         case(f"denied: {cmd!r}", cmd, 2)
+
+    def link_into_hooks(repo):
+        os.makedirs(repo.hooks_dir, exist_ok=True)
+        os.symlink(repo.hooks_dir, os.path.join(repo.work, "lnk"))
+    case("denied: write through a symlink into the hooks directory",
+         f"ls {HOOKS}; echo x > {{work}}/lnk/pre-push", 2, link_into_hooks)
     # Reading them is not a write.
     for cmd in (f"ls -la {HOOKS}/ 2>&1",
                 f"ls {HOOKS} >/dev/null 2>&1 && echo present",

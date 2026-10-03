@@ -9,17 +9,22 @@ All notable changes to this project will be documented in this file.
   counted any `>` as a write, so `ls <hooks dir> 2>&1` or `cat <config> > /tmp/copy` was
   denied. The check still reads the raw text, heredoc bodies included, so no wrapper or
   heredoc reader hides a write. It now sets aside fd duplications (`2>&1`, `>&-`) and
-  treats a `>` as harmless only when its target is a plain absolute path without
-  `ccguard` in it; a relative target (a protected directory may be the cwd after `cd`)
-  or one with `$`, quotes, globs or `~` still counts as a write.
+  treats a `>` as harmless only when its target is `/dev/null`, `/dev/stdout`,
+  `/dev/stderr`, or a plain absolute path with no `..`, outside `/proc` and `/dev`
+  (`/proc/self/cwd` and `/dev/fd/N` stand for the cwd or an open fd), without `ccguard`
+  in it or in its resolved form (symlinks). A relative target (a protected directory may
+  be the cwd after `cd`) or one with `$`, quotes, globs or `~` still counts as a write.
+- **push-gate: a protected path split by a line continuation was not checked** when the
+  command had no git or gh word; the joined text is now used to decide whether to check.
 - **push-gate: more writers count as writes next to ccguard's paths**: `touch`, `patch`,
   `ed`/`ex`/`vi`, `curl`, `wget`, `rsync`, `scp`, `tar`, `unzip`, `cpio`, `sponge`,
   `awk`, `php`, `lua`, `tclsh`, `git apply`/`am`, and `sed` with `--in-place` or
   combined flags (`-Ei`).
-- **push-gate: ways to turn the pre-push gate off went through**: `CLAUDECODE+=x` (the
-  gate needs exactly `1`), `export -n`, `declare +x`, `read`, `mapfile`, `printf -v` and
-  `for CLAUDECODE in ...`, and `unset` or `export` split by a line continuation or a quoted
-  `;`. They are now denied next to git.
+- **push-gate: more ways to turn the pre-push gate off are denied next to git**:
+  `CLAUDECODE+=x` (the gate needs exactly `1`), `export -n`, `declare +x`, `read`,
+  `mapfile`, `printf -v` and `for CLAUDECODE in ...`, and `unset` or `export` split by a
+  line continuation or a quoted `;`. The list is not complete: a name built at run time
+  (`N=CLAUDECODE; unset $N`, `"CLAUDE""CODE"`) still goes through, as in 0.2.0.
 
 ### Known
 - Text that only mentions a protected path is still denied when the same command writes
@@ -30,7 +35,12 @@ All notable changes to this project will be documented in this file.
 - A quoted label such as `echo "CLAUDECODE=$CLAUDECODE"`, or `export CLAUDECODE`, next to
   git is still denied: the CLAUDECODE check stays on the raw text so that wrappers the
   parser does not follow (`xargs sh -c`, `timeout sh -c`, `find -exec sh -c`) cannot hide
-  a change. Print the value without the `NAME=` label.
+  a change. Print the value without the `NAME=` label. The same holds for a git commit
+  message that mentions `CLAUDECODE` after a word such as `read` or `export`.
+- Writers that need neither `>` nor a listed word (`sed 's/x/y/w <path>'`, `mkdir`,
+  `sort -o`, other interpreters) and a protected path split across words
+  (`cd ~/.local/share/ccguard; ... > git-hooks/pre-push`) go through, as in 0.2.0. The
+  guard stops mistakes of a cooperating agent; it is not a sandbox.
 
 ## [0.2.0] - 2026-10-03
 
