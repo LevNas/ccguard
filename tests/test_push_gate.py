@@ -162,15 +162,36 @@ def test_own_files_raw_check():
                 f"cat <<'EOF' | sh\necho x > {CONFIG}\nEOF",
                 f"cat <<'EOF' > /tmp/x.sh\nrm -f {HOOKS}/pre-push\nEOF\nbash /tmp/x.sh",
                 f"xargs rm <<'EOF'\n{HOOKS}/pre-push\nEOF",
-                f"rm -f {HOOKS}/pre-push '"):
+                f"rm -f {HOOKS}/pre-push '",
+                # relative targets after cd
+                f"cd {HOOKS} && : > pre-push",
+                f"cd {HOOKS} && printf '' >pre-push",
+                # a quoted or commented `<<X` must not hide the lines after it
+                f"echo '<<X'\nrm -f {HOOKS}/pre-push\nX",
+                f"echo hi # <<X\nrm -f {HOOKS}/pre-push\nX",
+                # heredoc readers that no word list can name
+                f"$SHELL <<'EOF'\nrm -f {HOOKS}/pre-push\nEOF",
+                f"ed <<'EOF'\ne {CONFIG}\n1d\nw\nEOF",
+                f"cat > /tmp/x <<'EOF'\n#!/bin/sh\nrm -f {HOOKS}/pre-push\nEOF\n"
+                "chmod +x /tmp/x; /tmp/x",
+                # writers and flag spellings
+                f"sed --in-place s/a/b/ {CONFIG}",
+                f"sed -Ei s/a/b/ {CONFIG}",
+                f"curl -o {CONFIG} https://example.com/x",
+                f"touch {HOOKS}/pre-push",
+                f"patch {CONFIG} /tmp/p.diff",
+                # targets spelled around the literal pattern
+                f"cat {CONFIG} > ~/.config/ccguard/./push-gate.json",
+                f"cat {CONFIG} > /home/u/.config/ccguard//push-gate.json",
+                f"echo x > \"/home/u/.config/ccguard/push-gate.json\""):
         case(f"denied: {cmd!r}", cmd, 2)
-    # Reading them, or mentioning the path in text written elsewhere, is not a write.
+    # Reading them is not a write.
     for cmd in (f"ls -la {HOOKS}/ 2>&1",
                 f"ls {HOOKS} >/dev/null 2>&1 && echo present",
                 f"cat {CONFIG} > /tmp/copy.json",
                 f"cat {HOOKS}/pre-push 2>/dev/null | head -5",
-                f"cat > \"$TMPDIR/msg.txt\" <<'EOF'\ndotfiles: set core.hooksPath to {HOOKS}\nEOF\n"
-                "git commit -q -F \"$TMPDIR/msg.txt\""):
+                f"wc -l {HOOKS}/pre-push",
+                f"grep -n gate {HOOKS}/pre-push 2>&1 | head"):
         case(f"allowed: {cmd!r}", cmd, 0)
 
 
@@ -182,8 +203,15 @@ def test_claudecode_stays_set():
                 "echo `CLAUDECODE= git push origin feat`",
                 "CLAUDECODE+=x git push origin feat",
                 "export -n CLAUDECODE; git push origin feat",
-                "declare +x CLAUDECODE; git push origin feat"):
-        case(f"denied: {cmd}", cmd, 2)
+                "declare +x CLAUDECODE; git push origin feat",
+                "read CLAUDECODE </dev/null; git push origin feat",
+                "printf -v CLAUDECODE 0; git push origin feat",
+                "mapfile CLAUDECODE </dev/null; git push origin feat",
+                "for CLAUDECODE in 0; do git push origin feat; done",
+                "export -n \\\nCLAUDECODE; git push origin feat",
+                "unset \\\nCLAUDECODE; git push origin feat",
+                "export -n 'a;b' CLAUDECODE; git push origin feat"):
+        case(f"denied: {cmd!r}", cmd, 2)
 
 
 # ----------------------------------------------------------------------- gh
