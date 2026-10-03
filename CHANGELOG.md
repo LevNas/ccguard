@@ -46,6 +46,9 @@ found these, which need a deliberate attempt:
 - A delayed or background writer started by one command (`(sleep 20; cp ...) &`) and a
   push in a later one: the rewrite runs before each command, not during it. 0.2.1
   denied the first command by its text.
+- While the hooks cannot be rewritten, only commands that mention git are denied, so a
+  push from a script or `make` target goes through. Other commands are left alone so
+  that a broken hooks directory does not block the Bash tool.
 - The config and the plugin cache are protected by their text only, so `cd` into them
   and a relative name goes through, as in 0.2.1. No gate path is trusted, so the cache
   does not reach the hooks. A `--plugin-dir` checkout is not protected at all.
