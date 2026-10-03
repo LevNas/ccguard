@@ -189,6 +189,14 @@ def test_own_files_raw_check():
                 f"cd {HOOKS} && echo x > /proc/1234/cwd/pre-push",
                 f"exec 3< {HOOKS}; echo x > /dev/fd/3/pre-push",
                 f"cd {HOOKS} && echo x > /tmp/../proc/self/cwd/pre-push",
+                f"cd {HOOKS} && echo x > //proc/self/cwd/pre-push",
+                f"cd {HOOKS} && echo x > /./proc/self/cwd/pre-push",
+                f"exec 3< {HOOKS}; echo x > /./dev/fd/3/pre-push",
+                f"cd {HOOKS} && echo x > /tmp/./../proc/self/cwd/pre-push",
+                # /dev/stdout and /dev/stderr reopen fd 1 and 2, which may point at a file
+                f"exec 1< {CONFIG}; echo x >/dev/stdout",
+                f"exec 2< {CONFIG}; echo x >/dev/stderr",
+                f"ls {HOOKS}; echo x > /home/u/notes.txt",
                 # `>&1:` is a file name to bash, not an fd duplication
                 f"cd {HOOKS} && echo x >&1:",
                 # a protected path split by a line continuation is still one word
@@ -200,6 +208,11 @@ def test_own_files_raw_check():
         os.symlink(repo.hooks_dir, os.path.join(repo.work, "lnk"))
     case("denied: write through a symlink into the hooks directory",
          f"ls {HOOKS}; echo x > {{work}}/lnk/pre-push", 2, link_into_hooks)
+
+    def link_out_of_tmp(repo):
+        os.symlink("/", os.path.join(repo.work, "root"))
+    case("denied: write through a symlink that leads out of /tmp",
+         f"ls {HOOKS}; echo x > {{work}}/root/var/x", 2, link_out_of_tmp)
     # Reading them is not a write.
     for cmd in (f"ls -la {HOOKS}/ 2>&1",
                 f"ls {HOOKS} >/dev/null 2>&1 && echo present",

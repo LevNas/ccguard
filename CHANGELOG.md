@@ -9,11 +9,13 @@ All notable changes to this project will be documented in this file.
   counted any `>` as a write, so `ls <hooks dir> 2>&1` or `cat <config> > /tmp/copy` was
   denied. The check still reads the raw text, heredoc bodies included, so no wrapper or
   heredoc reader hides a write. It now sets aside fd duplications (`2>&1`, `>&-`) and
-  treats a `>` as harmless only when its target is `/dev/null`, `/dev/stdout`,
-  `/dev/stderr`, or a plain absolute path with no `..`, outside `/proc` and `/dev`
-  (`/proc/self/cwd` and `/dev/fd/N` stand for the cwd or an open fd), without `ccguard`
-  in it or in its resolved form (symlinks). A relative target (a protected directory may
-  be the cwd after `cd`) or one with `$`, quotes, globs or `~` still counts as a write.
+  treats a `>` as harmless only when its target is exactly `/dev/null`, or a plain path
+  under `/tmp` (no empty, `.` or `..` component) that resolves inside `/tmp` without
+  `ccguard` in it. It is an allowlist because every "absolute path except ..." rule
+  leaked in review: `//proc/self/cwd/<name>` and `/dev/fd/N/<name>` stand for the cwd or
+  an open fd, and `/dev/stdout` reopens fd 1, which `exec 1< <file>` may point at a
+  protected file. Any other target (relative, `~`, `$`, quotes, globs, elsewhere) still
+  counts as a write.
 - **push-gate: a protected path split by a line continuation was not checked** when the
   command had no git or gh word; the joined text is now used to decide whether to check.
 - **push-gate: more writers count as writes next to ccguard's paths**: `touch`, `patch`,

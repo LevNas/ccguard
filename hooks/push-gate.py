@@ -82,12 +82,13 @@ WRITE_WORDS = re.compile(r"\b(tee|rm|rmdir|chmod|chown|mv|cp|ln|truncate|install
                          r"\bfind\b[^\n]*\s-(delete|exec|execdir|ok|okdir|fprint\w*|fls)\b|"
                          r"\bgit\b[^\n]*\s(apply|am)\b")
 FD_DUP = re.compile(r"\d*[<>]&(\d+|-)(?=[\s;|&)<>]|$)")
-REDIRECT = re.compile(r">>?\|?\s*(\S*)")
-# A redirect target that is certainly not one of ccguard's files: a plain absolute path
-# with no `..`, outside /proc and /dev (/proc/self/cwd and /dev/fd/N resolve to the shell's
-# cwd or an open fd), whose resolved form does not reach ccguard either (see safe_target).
-SAFE_TARGET = re.compile(r"/[\w./+@%:,=-]*")
-SAFE_DEVICES = {"/dev/null", "/dev/stdout", "/dev/stderr"}
+REDIRECT = re.compile(r">>?\|?[ \t]*(\S*)")  # an empty target (`>` at line end) is not safe
+# Redirect targets that are certainly not ccguard's files (see safe_target): /dev/null,
+# or a plain path under /tmp. An allowlist, because every "absolute path except ..." rule
+# leaked: //proc/self/cwd/<name> and /dev/fd/N stand for the shell's cwd or an open fd, and
+# /dev/stdout reopens fd 1, which `exec 1< <file>` may point at a protected file.
+SAFE_TMP_TARGET = re.compile(r"/tmp(/[\w.+@%:,=-]+)+")
+TMP_ROOT = os.path.realpath("/tmp")
 
 
 # ------------------------------------------------------------------ parsing
@@ -469,18 +470,21 @@ def check_gh(cwd, args, inputs, bodies, assigns, substituted):
 # --------------------------------------------------------------------- main
 
 def safe_target(target):
-    """Whether a `>` target is certainly not one of ccguard's files.
+    """Whether a `>` target is certainly not one of ccguard's files: exactly /dev/null, or
+    a plain path under /tmp (no `.`, `..` or empty component) that resolves inside /tmp.
 
-    A relative target may sit in a protected directory after `cd`; `$`, quotes and globs
-    cannot be resolved here; /proc/self/cwd and /dev/fd/N stand for the shell's cwd or an
-    open fd; a symlink may lead into ccguard's directories."""
-    if target in SAFE_DEVICES:
+    Anything else counts as a write: a relative target may sit in a protected directory
+    after `cd`; `$`, quotes and globs cannot be resolved here; a symlink may lead out."""
+    if target == "/dev/null":
         return True
-    if not SAFE_TARGET.fullmatch(target) or ".." in target.split("/"):
+    if not SAFE_TMP_TARGET.fullmatch(target):
         return False
-    if target.startswith(("/proc/", "/dev/")) or "ccguard" in target.lower():
+    if any(part in (".", "..") for part in target.split("/")[2:]):
         return False
-    return "ccguard" not in os.path.realpath(target).lower()
+    resolved = os.path.realpath(target)
+    # ccguard's own directories may live under /tmp too (XDG_DATA_HOME, XDG_CONFIG_HOME).
+    return (resolved.startswith(TMP_ROOT + os.sep)
+            and "ccguard" not in target.lower() and "ccguard" not in resolved.lower())
 
 
 def writes_somewhere(text):
