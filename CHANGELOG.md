@@ -2,6 +2,45 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-10-03
+
+The git hooks are protected by their content instead of by command text (#2).
+
+### Changed
+- **push-gate: the hooks directory is compared with its content before every Bash
+  command.** The hooks are fixed text, so ccguard compares the 23 hooks with what it
+  writes; when one differs, is missing or is not executable, it restores them and denies
+  that one command, naming the hooks. A change made by one command is undone before the
+  next one, which might push, runs, however the change was written: through `cd` and a
+  relative name, a path split across words, or a writer no list names. `pre-push` names
+  the gate of the plugin version that wrote it; the gate of any ccguard version still in
+  the plugin cache is accepted, so sessions on two versions do not deny each other.
+- **push-gate: the text check no longer covers the hooks directory**, except for a
+  command that pushes and may also write to the hooks: the restore runs before the
+  command, so that one is still judged by its text. Reads with a redirect
+  (`ls <hooks dir> 2>&1`, a commit message in a heredoc that names the hooks path) are
+  allowed. The config and the plugin keep the text check: they have no content to
+  compare with, and a checksum would have to live where Claude can also write it.
+- `install_git_hooks.py` and `push-gate.py` share the hook templates in
+  `hooks/lib/git_hooks.py`. The templates are unchanged, so hooks written by 0.2.x are
+  not treated as changed.
+
+### Fixed
+- **push-gate: `cd` into the config directory and a relative name went through**
+  (`cd ~/.config/ccguard && : > push-gate.json`); `.config/ccguard` now counts as a
+  protected path.
+
+### Verified
+- The command corpus of 0.2.1 (720 commands) run through 0.2.1 and this version: 149 are
+  newly allowed, all of them touching only the hooks directory without a push (the
+  writes among them are restored before the next command); nothing else is newly
+  allowed, and nothing is newly denied.
+
+### Known
+- A change to the hooks and a push the parser does not recognise, in one command, still
+  goes through. The guard stops mistakes of a cooperating agent; it is not a sandbox.
+- Reading the config or the plugin with a redirect is still denied, as in 0.2.1.
+
 ## [0.2.1] - 2026-10-03
 
 This release only tightens checks. Every command 0.2.0 denied is still denied (checked

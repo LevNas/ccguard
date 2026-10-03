@@ -128,7 +128,7 @@ def test_gate_cannot_be_taken_out():
                 "unset CLAUDECODE; git push origin feat",
                 "env -i PATH=/usr/bin git push origin feat",
                 "sudo git push origin feat",
-                "rm -f ~/.local/share/ccguard/git-hooks/pre-push",
+                "rm -f ~/.local/share/ccguard/git-hooks/pre-push; git push origin feat",
                 "printf 'x' > ~/.config/ccguard/push-gate.json",
                 "sed -i s/a/b/ ~/.config/ccguard/push-gate.json"):
         case(f"denied: {cmd}", cmd, 2)
@@ -145,94 +145,187 @@ HOOKS = "~/.local/share/ccguard/git-hooks"
 CONFIG = "~/.config/ccguard/push-gate.json"
 
 
+PLUGIN = "~/.claude/plugins/cache/mk/ccguard/0.2.1/hooks/push-gate.py"
+
+
 def test_own_files_raw_check():
-    # Writes to ccguard's own files stay denied however they are wrapped: the check
-    # reads the raw text, only with data heredocs and fd duplications set aside.
-    for cmd in (f"echo {HOOKS}/pre-push | xargs rm",
+    # The config and the plugin have no content to compare with, so writes to them stay
+    # denied by their text however they are wrapped: the check reads the raw text, only
+    # with data heredocs and fd duplications set aside.
+    for cmd in (f"echo {CONFIG} | xargs rm",
                 f"echo x > $(echo {CONFIG})",
                 f"f={CONFIG}; echo x > \"$f\"",
-                f"echo x >> {HOOKS}/pre-push",
+                f"echo x >> {PLUGIN}",
                 f"echo x >| {CONFIG}",
                 f"echo x &> {CONFIG}",
-                f"ls {HOOKS} 2>&1 > {HOOKS}/pre-push",
+                f"ls {CONFIG} 2>&1 > {CONFIG}",
                 f"echo x | tee {CONFIG}",
-                f"find {HOOKS} -delete -exec rm {{}} +",
+                f"find ~/.claude/plugins/cache/mk/ccguard/ -delete",
                 f"python3 -c \"open('{CONFIG}', 'w')\"",
-                f"bash <<'EOF'\nrm -f {HOOKS}/pre-push\nEOF",
+                f"bash <<'EOF'\nrm -f {PLUGIN}\nEOF",
                 f"cat <<'EOF' | sh\necho x > {CONFIG}\nEOF",
-                f"cat <<'EOF' > /tmp/x.sh\nrm -f {HOOKS}/pre-push\nEOF\nbash /tmp/x.sh",
-                f"xargs rm <<'EOF'\n{HOOKS}/pre-push\nEOF",
-                f"rm -f {HOOKS}/pre-push '",
+                f"cat <<'EOF' > /tmp/x.sh\nrm -f {PLUGIN}\nEOF\nbash /tmp/x.sh",
+                f"xargs rm <<'EOF'\n{CONFIG}\nEOF",
+                f"rm -f {CONFIG} '",
                 # relative targets after cd
-                f"cd {HOOKS} && : > pre-push",
-                f"cd {HOOKS} && printf '' >pre-push",
+                "cd ~/.config/ccguard && : > push-gate.json",
+                "cd ~/.claude/plugins/cache/mk/ccguard/0.2.1/hooks && printf '' >push-gate.py",
                 # a quoted or commented `<<X` must not hide the lines after it
-                f"echo '<<X'\nrm -f {HOOKS}/pre-push\nX",
-                f"echo hi # <<X\nrm -f {HOOKS}/pre-push\nX",
+                f"echo '<<X'\nrm -f {CONFIG}\nX",
+                f"echo hi # <<X\nrm -f {CONFIG}\nX",
                 # heredoc readers that no word list can name
-                f"$SHELL <<'EOF'\nrm -f {HOOKS}/pre-push\nEOF",
+                f"$SHELL <<'EOF'\nrm -f {PLUGIN}\nEOF",
                 f"ed <<'EOF'\ne {CONFIG}\n1d\nw\nEOF",
-                f"cat > /tmp/x <<'EOF'\n#!/bin/sh\nrm -f {HOOKS}/pre-push\nEOF\n"
+                f"cat > /tmp/x <<'EOF'\n#!/bin/sh\nrm -f {PLUGIN}\nEOF\n"
                 "chmod +x /tmp/x; /tmp/x",
                 # writers and flag spellings
                 f"sed --in-place s/a/b/ {CONFIG}",
                 f"sed -Ei s/a/b/ {CONFIG}",
                 f"curl -o {CONFIG} https://example.com/x",
-                f"touch {HOOKS}/pre-push",
+                f"touch {PLUGIN}",
                 f"patch {CONFIG} /tmp/p.diff",
                 # targets spelled around the literal pattern
                 f"cat {CONFIG} > ~/.config/ccguard/./push-gate.json",
                 f"cat {CONFIG} > /home/u/.config/ccguard//push-gate.json",
                 f"echo x > \"/home/u/.config/ccguard/push-gate.json\"",
                 # absolute spellings of the cwd or an open fd, and `..`
-                f"cd {HOOKS} && echo x > /proc/self/cwd/pre-push",
-                f"cd {HOOKS} && echo x > /proc/1234/cwd/pre-push",
-                f"exec 3< {HOOKS}; echo x > /dev/fd/3/pre-push",
-                f"cd {HOOKS} && echo x > /tmp/../proc/self/cwd/pre-push",
-                f"cd {HOOKS} && echo x > //proc/self/cwd/pre-push",
-                f"cd {HOOKS} && echo x > /./proc/self/cwd/pre-push",
-                f"exec 3< {HOOKS}; echo x > /./dev/fd/3/pre-push",
-                f"cd {HOOKS} && echo x > /tmp/./../proc/self/cwd/pre-push",
+                f"cd {PLUGIN}/.. && echo x > /proc/self/cwd/push-gate.py",
+                f"exec 3< {PLUGIN}/..; echo x > /dev/fd/3/push-gate.py",
+                f"cd {PLUGIN}/.. && echo x > /tmp/../proc/self/cwd/push-gate.py",
                 # /dev/stdout and /dev/stderr reopen fd 1 and 2, which may point at a file
                 f"exec 1< {CONFIG}; echo x >/dev/stdout",
                 f"exec 2< {CONFIG}; echo x >/dev/stderr",
-                f"ls {HOOKS}; echo x > /home/u/notes.txt",
+                f"ls {CONFIG}; echo x > /home/u/notes.txt",
                 # `>&1:` is a file name to bash, not an fd duplication
-                f"cd {HOOKS} && echo x >&1:",
+                f"cd {PLUGIN}/.. && echo x >&1:",
                 # a protected path split by a line continuation is still one word
                 "echo x > ~/.config/ccguard/push-\\\ngate.json"):
         case(f"denied: {cmd!r}", cmd, 2)
 
-    def link_into_hooks(repo):
-        os.makedirs(repo.hooks_dir, exist_ok=True)
-        os.symlink(repo.hooks_dir, os.path.join(repo.work, "lnk"))
-    case("denied: write through a symlink into the hooks directory",
-         f"ls {HOOKS}; echo x > {{work}}/lnk/pre-push", 2, link_into_hooks)
-
     def link_out_of_tmp(repo):
         os.symlink("/", os.path.join(repo.work, "root"))
     case("denied: write through a symlink that leads out of /tmp",
-         f"ls {HOOKS}; echo x > {{work}}/root/var/x", 2, link_out_of_tmp)
+         f"ls {CONFIG}; echo x > {{work}}/root/var/x", 2, link_out_of_tmp)
     # Writers no list names, hidden by an exemption for `>`: any `>` stays a write.
     for cmd in (f"git config --file {CONFIG} a.b c 2>/dev/null",
                 f"echo X | sort -o {CONFIG} 2>/dev/null",
                 f"echo hi | sed -n 'w {CONFIG}' >/dev/null",
-                f"mkdir {HOOKS}/evil 2>/dev/null",
+                f"mkdir {PLUGIN}/../evil 2>/dev/null",
                 f"link {CONFIG} /tmp/lk; echo x > /tmp/lk",
                 f"l\"\"n -s {CONFIG} /tmp/lk; echo x > /tmp/lk",
                 f"l\"\"n -s {CONFIG} /tmp/zz_lk1; echo x >/tmp/zz_lk1>&1",
                 # Known false positives: a read that carries a redirect. Use the Read tool,
                 # or drop the redirect.
-                f"ls -la {HOOKS}/ 2>&1",
-                f"ls {HOOKS} >/dev/null 2>&1 && echo present",
+                f"ls -la {PLUGIN}/.. 2>&1",
                 f"cat {CONFIG} > /tmp/copy.json"):
         case(f"denied: {cmd!r}", cmd, 2)
     # Reading them without a redirect is not a write.
-    for cmd in (f"ls -la {HOOKS}/",
-                f"cat {HOOKS}/pre-push | head -5",
-                f"wc -l {HOOKS}/pre-push",
-                f"grep -n gate {HOOKS}/pre-push | head"):
+    for cmd in (f"cat {CONFIG} | head -5",
+                f"wc -l {CONFIG}",
+                f"grep -n gate {PLUGIN} | head"):
         case(f"allowed: {cmd!r}", cmd, 0)
+
+
+# ------------------------------------------------------------ the git hooks
+
+INSTALL = os.path.join(os.path.dirname(HOOK), "install_git_hooks.py")
+
+
+def install_hooks(repo):
+    subprocess.run([sys.executable, INSTALL], capture_output=True, env=repo.env(), check=True)
+
+
+def hook_path(repo, name="pre-push"):
+    return os.path.join(repo.hooks_dir, name)
+
+
+def with_hooks(command, expected, change=None, label=None, env=None):
+    """Install the hooks, apply `change`, run `command`; return the repository's base."""
+    with tempfile.TemporaryDirectory() as base:
+        repo = Repo(base)
+        install_hooks(repo)
+        if change:
+            change(repo)
+        if env:
+            repo.env = (lambda e=repo.env(): dict(e, **env))
+        rc, err = repo.run(command)
+        check(label or f"{'allowed' if expected == 0 else 'denied'}: {command!r}",
+              rc == expected, (rc, err))
+        return repo, rc, err
+
+
+def test_hooks_reads_allowed():
+    # The reported false positives (#2): reads that carry a redirect.
+    for cmd in (f"ls -la {HOOKS}/ 2>&1",
+                f"ls {HOOKS} >/dev/null 2>&1 && echo present",
+                f"cat > /tmp/msg.txt <<'EOF'\nset core.hooksPath to {HOOKS}\nEOF",
+                f"cat {HOOKS}/pre-push | head -5",
+                f"grep -n gate {HOOKS}/pre-push 2>/dev/null"):
+        with_hooks(cmd, 0)
+    # No hooks directory yet: nothing to compare, nothing denied.
+    case("allowed: no hooks directory", "git status", 0)
+
+
+def test_hooks_changed_are_restored():
+    def append(repo):
+        with open(hook_path(repo), "a") as f:
+            f.write("exit 0\n")
+
+    def remove(repo):
+        os.remove(hook_path(repo, "pre-commit"))
+
+    def no_exec(repo):
+        os.chmod(hook_path(repo), 0o644)
+
+    def other_gate(repo):
+        with open(hook_path(repo), encoding="utf-8") as f:
+            text = f.read()
+        gate = text.split('[ ! -f "', 1)[1].split('"', 1)[0]
+        with open(hook_path(repo), "w", encoding="utf-8") as f:
+            f.write(text.replace(gate, "/tmp/evil/plugins/cache/m/ccguard/9/hooks/pre_push_gate.py"))
+
+    for label, change, name in (("appended to", append, "pre-push"),
+                                ("removed", remove, "pre-commit"),
+                                ("made not executable", no_exec, "pre-push"),
+                                ("pointed at a gate outside the plugin cache", other_gate,
+                                 "pre-push")):
+        repo, rc, err = with_hooks("git status", 2, change, f"denied once: a hook {label}")
+        # restored: the same command now passes
+        rc2, err2 = repo.run("git status")
+        check(f"restored: a hook {label}", rc2 == 0 and name in err, (rc2, err, err2))
+
+
+def test_hooks_other_installed_version_accepted():
+    # Two sessions on different ccguard versions write their own gate path into pre-push;
+    # neither is a change. The other version must be installed in the plugin cache.
+    with tempfile.TemporaryDirectory() as claude:
+        gate = os.path.join(claude, "plugins", "cache", "mk", "ccguard", "0.1.9", "hooks",
+                            "pre_push_gate.py")
+        os.makedirs(os.path.dirname(gate))
+        open(gate, "w").close()
+
+        def older(repo):
+            with open(hook_path(repo), encoding="utf-8") as f:
+                text = f.read()
+            mine = text.split('[ ! -f "', 1)[1].split('"', 1)[0]
+            with open(hook_path(repo), "w", encoding="utf-8") as f:
+                f.write(text.replace(mine, gate))
+
+        with_hooks("git status", 0, older, "allowed: pre-push of another installed version",
+                   env={"CLAUDE_CONFIG_DIR": claude})
+        os.remove(gate)
+        with_hooks("git status", 2, older, "denied: pre-push of a version no longer installed",
+                   env={"CLAUDE_CONFIG_DIR": claude})
+
+
+def test_hooks_write_with_push_denied():
+    # The restore runs before the command, so a write and a push in one command is
+    # judged by its text, as for the config.
+    for cmd in (f"rm -f {HOOKS}/pre-push; git push origin feat",
+                f"echo x >> {HOOKS}/pre-push && git push origin main",
+                f"bash -c 'touch {HOOKS}/pre-push; git push origin feat'"):
+        with_hooks(cmd, 2)
+    with_hooks(f"ls {HOOKS}; git push origin main", 0)
 
 
 def test_claudecode_stays_set():

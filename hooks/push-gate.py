@@ -10,7 +10,13 @@ gate runs:
   core.hooksPath (reading it is fine), clearing CLAUDECODE (the gate acts
   only when it is 1) or the environment around git, overriding HOME /
   XDG_CONFIG_HOME / GIT_CONFIG_* around a push, `git send-pack`, a push
-  through sudo, and writes to the ccguard hooks directory or config;
+  through sudo, and writes to the ccguard config or plugin;
+- before every Bash command, compares the ccguard git hooks with what
+  ccguard writes (lib/git_hooks.py); when they differ, restores them and
+  denies that one command. A command that pushes and may also write to the
+  hooks is denied, since the restore runs before it. What remains open is
+  a change to the hooks and a push this parser does not recognise, in one
+  command;
 - denies a git push from a repository where core.hooksPath does not point
   at the ccguard hooks directory (not set yet, or the repository sets its
   own).
@@ -47,12 +53,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
+import git_hooks  # noqa: E402
 from ccguard_content import Deny, content_patterns, first_hit, git_out, set_budget  # noqa: E402
 
-GIT_HOOKS = os.path.join(
-    os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share"),
-    "ccguard", "git-hooks",
-)
+GIT_HOOKS = git_hooks.TARGET
 MAX_FILE = 20 << 20
 MAX_DEPTH = 3
 
@@ -74,7 +78,14 @@ CONFIG_ENV = re.compile(r"\b(HOME|XDG_CONFIG_HOME|GIT_CONFIG_GLOBAL|GIT_CONFIG_S
                         r"GIT_CONFIG_NOSYSTEM|GIT_CONFIG_PARAMETERS|GIT_CONFIG_COUNT|"
                         r"GIT_CONFIG_KEY_\d+|GIT_CONFIG_VALUE_\d+)=|"
                         r"(-u\s+|unset\s+)(HOME|XDG_CONFIG_HOME)\b")
-PROTECTED_PATHS = re.compile(r"ccguard/(git-hooks|push-gate\.json)|plugins/cache/[^/\s]+/ccguard/")
+# The config and the plugin have no content to compare with, so commands that mention
+# them are checked as text; the config directory counts too, for `cd` and a relative
+# name. The hooks directory is compared with its content before every command
+# (restore_hooks), so its text check is left only for a command that also pushes.
+TEXT_PROTECTED = re.compile(r"ccguard/push-gate\.json|\.config/ccguard(?![\w.-])|"
+                            r"plugins/cache/[^/\s]+/ccguard/")
+PROTECTED_PATHS = re.compile(TEXT_PROTECTED.pattern + r"|ccguard/git-hooks")
+HOOKS_PATH = re.compile(r"ccguard/git-hooks")
 # Any `>` counts as a write next to a protected path. That rule also covers writers no
 # list names (`git config --file`, `sort -o`, `sed w`, ...); every exemption tried for it
 # (`2>&1`, `/dev/null`, `/tmp` targets) let such writers through in review. The words
@@ -471,9 +482,39 @@ def check_raw(command):
     if GIT.search(joined) and CLEARS_CLAUDECODE.search(joined):
         raise Deny("This clears CLAUDECODE or the environment around git, which turns the "
                    "pre-push gate off. Run git with the environment as it is.")
-    if PROTECTED_PATHS.search(joined) and WRITES.search(joined):
-        raise Deny("This would change ccguard's hooks, gate or config. Those are the user's "
+    if TEXT_PROTECTED.search(joined) and WRITES.search(joined):
+        raise Deny("This would change ccguard's gate or config. Those are the user's "
                    "to change.")
+
+
+def check_hooks_write(command, pushes):
+    """A push in the same command as a possible write to the hooks: the restore before
+    the command cannot see that write, so the text decides, as for the config."""
+    joined = command.replace("\\\n", "")
+    if pushes and HOOKS_PATH.search(joined) and WRITES.search(joined):
+        raise Deny("This pushes in the same command as it may change ccguard's git hooks. "
+                   "Run the push as a separate command, without touching the hooks.")
+
+
+def restore_hooks():
+    """Put back ccguard's git hooks if they differ from what ccguard writes.
+
+    Runs before every Bash command, so a change made by one command is undone
+    before the next one, which might push, can run.
+    """
+    names = git_hooks.changed()
+    if not names:
+        return
+    listed = ", ".join(names)
+    try:
+        git_hooks.install(names=names)
+    except OSError as e:
+        raise Deny(f"ccguard's git hooks in {git_hooks.TARGET} were changed ({listed}) and "
+                   f"could not be restored ({e.__class__.__name__}). Ask the user to start "
+                   "a new session.") from None
+    raise Deny(f"ccguard's git hooks were changed ({listed}) and have been restored; they "
+               "are the user's to change. Run the command again if it was not meant to "
+               "change them.")
 
 
 def check(command, cwd, depth=0):
@@ -537,11 +578,20 @@ def main():
         cwd = data.get("cwd") or os.getcwd()
     except (ValueError, AttributeError):
         return 0
+    try:
+        restore_hooks()
+    except Deny as denial:
+        print(f"BLOCKED (ccguard push-gate): {denial}", file=sys.stderr)
+        return 2
+    except Exception:  # noqa: BLE001 - the text checks below still run
+        pass
     if not relevant(command):
         return 0
     set_budget(25)
     try:
-        check_gate_active(check(command, cwd))
+        pushes = check(command, cwd)
+        check_hooks_write(command, pushes)
+        check_gate_active(pushes)
     except Deny as denial:
         print(f"BLOCKED (ccguard push-gate): {denial}", file=sys.stderr)
         return 2
