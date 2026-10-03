@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] - 2026-10-03
+
+### Fixed
+- **push-gate: read-only commands denied as writes to ccguard's files** (#2). The
+  own-file check counted any `>` as a write and read heredoc text as commands, so
+  `ls <hooks dir> 2>&1` and a commit message written with `cat > "$F" <<'EOF'` that
+  mentions the hooks path were denied. The check still reads the raw text (no wrapper
+  hides a write), but first sets aside fd duplications (`2>&1`, `>&-`) and heredoc bodies
+  that nothing in the command may run (no shell, interpreter, `xargs`, `source` or `eval`
+  word anywhere). A `>` now counts as a write when its target is a protected path or is
+  not a plain path (`$`, backticks, `$(...)`); write commands (`rm`, `tee`, `sed -i`,
+  interpreters, `find -delete`/`-exec`, ...) count as before.
+- **push-gate: three ways to turn the pre-push gate off went through**:
+  `CLAUDECODE+=x` (the gate needs exactly `1`), `export -n CLAUDECODE` and
+  `declare +x CLAUDECODE`. `export`, `declare`, `typeset`, `readonly` and `local` naming
+  `CLAUDECODE` are now denied next to git, like `unset`.
+
+### Known
+- A quoted label such as `echo "CLAUDECODE=$CLAUDECODE"` next to git is still denied: the
+  CLAUDECODE check stays on the raw text so that wrappers the parser does not follow
+  (`xargs sh -c`, `timeout sh -c`, `find -exec sh -c`) cannot hide a change. Print the
+  value without the `NAME=` label.
+
 ## [0.2.0] - 2026-10-03
 
 ### Added

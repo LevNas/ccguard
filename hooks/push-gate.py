@@ -66,16 +66,25 @@ HEREDOC = re.compile(r"(?<!<)<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 HEREDOC_CAT = re.compile(r"\$\(\s*cat\s+<<-?\s*['\"]?\w+['\"]?\s*\)\s*", re.S)
 
 GIT = re.compile(r"\bgit\b")
-CLEARS_CLAUDECODE = re.compile(r"\bCLAUDECODE\s*=|-u\s*['\"]?CLAUDECODE\b|"
-                               r"\bunset\b[^\n;&|]*\bCLAUDECODE\b|"
+CLEARS_CLAUDECODE = re.compile(r"\bCLAUDECODE\s*\+?=|-u\s*['\"]?CLAUDECODE\b|"
+                               r"\b(unset|export|declare|typeset|readonly|local)\b[^\n;&|]*"
+                               r"\bCLAUDECODE\b|"
                                r"\benv\s+((-\S+|\w+=\S*)\s+)*(-i|--ignore-environment|-)(\s|$)")
 CONFIG_ENV = re.compile(r"\b(HOME|XDG_CONFIG_HOME|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|"
                         r"GIT_CONFIG_NOSYSTEM|GIT_CONFIG_PARAMETERS|GIT_CONFIG_COUNT|"
                         r"GIT_CONFIG_KEY_\d+|GIT_CONFIG_VALUE_\d+)=|"
                         r"(-u\s+|unset\s+)(HOME|XDG_CONFIG_HOME)\b")
 PROTECTED_PATHS = re.compile(r"ccguard/(git-hooks|push-gate\.json)|plugins/cache/[^/\s]+/ccguard/")
-WRITES = re.compile(r">|\b(tee|rm|rmdir|chmod|chown|mv|cp|ln|truncate|install|dd|unlink|shred)\b|"
-                    r"\b(sed|perl)\b[^\n]*\s-i|\b(python3?|perl|ruby|node)\b")
+WRITE_WORDS = re.compile(r"\b(tee|rm|rmdir|chmod|chown|mv|cp|ln|truncate|install|dd|unlink|"
+                         r"shred)\b|\b(sed|perl)\b[^\n]*\s-i|\b(python3?|perl|ruby|node)\b|"
+                         r"\bfind\b[^\n]*\s-(delete|exec|execdir|ok|okdir|fprint\w*|fls)\b")
+# Words that make heredoc text run as code or arguments (`bash <<EOF`, `cat <<EOF | sh`,
+# `xargs rm <<EOF`, a script written now and run later in the same command).
+RUNNERS = re.compile(r"\b(bash|sh|zsh|dash|ksh|python3?|perl|ruby|node|xargs|source|eval|exec)\b|"
+                     r"(^|[\s;&|(])\.\s")
+FD_DUP = re.compile(r"\d*[<>]&(\d+|-)(?![\w/.~$])")
+REDIRECT = re.compile(r">>?\|?\s*(\S*)")
+PLAIN_TARGET = re.compile(r"['\"]?[\w./~+@%:,=-]+['\"]?")
 
 
 # ------------------------------------------------------------------ parsing
@@ -456,11 +465,33 @@ def check_gh(cwd, args, inputs, bodies, assigns, substituted):
 
 # --------------------------------------------------------------------- main
 
+def without_data_heredocs(command):
+    """The command with heredoc bodies left out, unless something in it may run them.
+
+    A body written by `cat > file <<EOF` is data; the same body is code when a shell,
+    an interpreter, xargs, source or eval appears anywhere else in the command."""
+    stripped, bodies = split_heredocs(command)
+    return command if bodies and RUNNERS.search(stripped) else stripped
+
+
+def writes_somewhere(text):
+    """Whether text writes a file: a write command, or a `>` whose target is not a plain path."""
+    if WRITE_WORDS.search(text):
+        return True
+    for m in REDIRECT.finditer(text):
+        target = m.group(1)
+        if PROTECTED_PATHS.search(target) or not PLAIN_TARGET.fullmatch(target):
+            return True
+    return False
+
+
 def check_raw(command):
+    """Checks on the raw text, so that no spelling or wrapper hides them."""
     if GIT.search(command) and CLEARS_CLAUDECODE.search(command):
         raise Deny("This clears CLAUDECODE or the environment around git, which turns the "
                    "pre-push gate off. Run git with the environment as it is.")
-    if PROTECTED_PATHS.search(command) and WRITES.search(command):
+    text = FD_DUP.sub(" ", without_data_heredocs(command))
+    if PROTECTED_PATHS.search(text) and writes_somewhere(text):
         raise Deny("This would change ccguard's hooks, gate or config. Those are the user's "
                    "to change.")
 

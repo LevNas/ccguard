@@ -141,6 +141,51 @@ def test_gate_cannot_be_taken_out():
     case("allowed: env with a rebase", "env X=1 git rebase -i HEAD~1", 0)
 
 
+HOOKS = "~/.local/share/ccguard/git-hooks"
+CONFIG = "~/.config/ccguard/push-gate.json"
+
+
+def test_own_files_raw_check():
+    # Writes to ccguard's own files stay denied however they are wrapped: the check
+    # reads the raw text, only with data heredocs and fd duplications set aside.
+    for cmd in (f"echo {HOOKS}/pre-push | xargs rm",
+                f"echo x > $(echo {CONFIG})",
+                f"f={CONFIG}; echo x > \"$f\"",
+                f"echo x >> {HOOKS}/pre-push",
+                f"echo x >| {CONFIG}",
+                f"echo x &> {CONFIG}",
+                f"ls {HOOKS} 2>&1 > {HOOKS}/pre-push",
+                f"echo x | tee {CONFIG}",
+                f"find {HOOKS} -delete -exec rm {{}} +",
+                f"python3 -c \"open('{CONFIG}', 'w')\"",
+                f"bash <<'EOF'\nrm -f {HOOKS}/pre-push\nEOF",
+                f"cat <<'EOF' | sh\necho x > {CONFIG}\nEOF",
+                f"cat <<'EOF' > /tmp/x.sh\nrm -f {HOOKS}/pre-push\nEOF\nbash /tmp/x.sh",
+                f"xargs rm <<'EOF'\n{HOOKS}/pre-push\nEOF",
+                f"rm -f {HOOKS}/pre-push '"):
+        case(f"denied: {cmd!r}", cmd, 2)
+    # Reading them, or mentioning the path in text written elsewhere, is not a write.
+    for cmd in (f"ls -la {HOOKS}/ 2>&1",
+                f"ls {HOOKS} >/dev/null 2>&1 && echo present",
+                f"cat {CONFIG} > /tmp/copy.json",
+                f"cat {HOOKS}/pre-push 2>/dev/null | head -5",
+                f"cat > \"$TMPDIR/msg.txt\" <<'EOF'\ndotfiles: set core.hooksPath to {HOOKS}\nEOF\n"
+                "git commit -q -F \"$TMPDIR/msg.txt\""):
+        case(f"allowed: {cmd!r}", cmd, 0)
+
+
+def test_claudecode_stays_set():
+    # The pre-push gate acts only when CLAUDECODE=1, however the change is wrapped.
+    for cmd in ("xargs sh -c 'CLAUDECODE= git push origin feat'",
+                "timeout 5 sh -c 'CLAUDECODE= git push origin feat'",
+                "find . -maxdepth 0 -exec sh -c 'CLAUDECODE= git push origin feat' \\;",
+                "echo `CLAUDECODE= git push origin feat`",
+                "CLAUDECODE+=x git push origin feat",
+                "export -n CLAUDECODE; git push origin feat",
+                "declare +x CLAUDECODE; git push origin feat"):
+        case(f"denied: {cmd}", cmd, 2)
+
+
 # ----------------------------------------------------------------------- gh
 
 def gh_setup(body="", skip=()):
