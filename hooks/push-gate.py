@@ -75,20 +75,16 @@ CONFIG_ENV = re.compile(r"\b(HOME|XDG_CONFIG_HOME|GIT_CONFIG_GLOBAL|GIT_CONFIG_S
                         r"GIT_CONFIG_KEY_\d+|GIT_CONFIG_VALUE_\d+)=|"
                         r"(-u\s+|unset\s+)(HOME|XDG_CONFIG_HOME)\b")
 PROTECTED_PATHS = re.compile(r"ccguard/(git-hooks|push-gate\.json)|plugins/cache/[^/\s]+/ccguard/")
-WRITE_WORDS = re.compile(r"\b(tee|rm|rmdir|chmod|chown|mv|cp|ln|truncate|install|dd|unlink|"
-                         r"shred|touch|patch|ed|ex|vi|vim|nvim|curl|wget|rsync|scp|tar|unzip|"
-                         r"cpio|sponge|awk|gawk|python3?|perl|ruby|node|php|lua|tclsh)\b|"
-                         r"\bsed\b[^\n]*\s(-[a-zA-Z]*i|--in-place)|"
-                         r"\bfind\b[^\n]*\s-(delete|exec|execdir|ok|okdir|fprint\w*|fls)\b|"
-                         r"\bgit\b[^\n]*\s(apply|am)\b")
-FD_DUP = re.compile(r"\d*[<>]&(\d+|-)(?=[\s;|&)<>]|$)")
-REDIRECT = re.compile(r">>?\|?[ \t]*(\S*)")  # an empty target (`>` at line end) is not safe
-# Redirect targets that are certainly not ccguard's files (see safe_target): /dev/null,
-# or a plain path under /tmp. An allowlist, because every "absolute path except ..." rule
-# leaked: //proc/self/cwd/<name> and /dev/fd/N stand for the shell's cwd or an open fd, and
-# /dev/stdout reopens fd 1, which `exec 1< <file>` may point at a protected file.
-SAFE_TMP_TARGET = re.compile(r"/tmp(/[\w.+@%:,=-]+)+")
-TMP_ROOT = os.path.realpath("/tmp")
+# Any `>` counts as a write next to a protected path. That rule also covers writers no
+# list names (`git config --file`, `sort -o`, `sed w`, ...); every exemption tried for it
+# (`2>&1`, `/dev/null`, `/tmp` targets) let such writers through in review. The words
+# below catch writes that need no `>`.
+WRITES = re.compile(r">|\b(tee|rm|rmdir|mkdir|chmod|chown|mv|cp|ln|link|truncate|install|dd|"
+                    r"unlink|shred|touch|patch|ed|ex|vi|vim|nvim|curl|wget|rsync|scp|tar|unzip|"
+                    r"cpio|sponge|awk|gawk|python3?|perl|ruby|node|php|lua|tclsh)\b|"
+                    r"\bsed\b[^\n]*\s(-[a-zA-Z]*i|--in-place)|\bsort\b[^\n]*\s-o|"
+                    r"\bfind\b[^\n]*\s-(delete|exec|execdir|ok|okdir|fprint\w*|fls)\b|"
+                    r"\bgit\b[^\n]*\s(apply|am|config)\b")
 
 
 # ------------------------------------------------------------------ parsing
@@ -469,39 +465,13 @@ def check_gh(cwd, args, inputs, bodies, assigns, substituted):
 
 # --------------------------------------------------------------------- main
 
-def safe_target(target):
-    """Whether a `>` target is certainly not one of ccguard's files: exactly /dev/null, or
-    a plain path under /tmp (no `.`, `..` or empty component) that resolves inside /tmp.
-
-    Anything else counts as a write: a relative target may sit in a protected directory
-    after `cd`; `$`, quotes and globs cannot be resolved here; a symlink may lead out."""
-    if target == "/dev/null":
-        return True
-    if not SAFE_TMP_TARGET.fullmatch(target):
-        return False
-    if any(part in (".", "..") for part in target.split("/")[2:]):
-        return False
-    resolved = os.path.realpath(target)
-    # ccguard's own directories may live under /tmp too (XDG_DATA_HOME, XDG_CONFIG_HOME).
-    return (resolved.startswith(TMP_ROOT + os.sep)
-            and "ccguard" not in target.lower() and "ccguard" not in resolved.lower())
-
-
-def writes_somewhere(text):
-    """Whether text may write a file: a write command, or a `>` to anything but a safe target."""
-    if WRITE_WORDS.search(text):
-        return True
-    return any(not safe_target(m.group(1)) for m in REDIRECT.finditer(text))
-
-
 def check_raw(command):
     """Checks on the raw text (heredoc bodies included), so that no wrapper hides them."""
     joined = command.replace("\\\n", "")
     if GIT.search(joined) and CLEARS_CLAUDECODE.search(joined):
         raise Deny("This clears CLAUDECODE or the environment around git, which turns the "
                    "pre-push gate off. Run git with the environment as it is.")
-    text = FD_DUP.sub(" ", joined)
-    if PROTECTED_PATHS.search(text) and writes_somewhere(text):
+    if PROTECTED_PATHS.search(joined) and WRITES.search(joined):
         raise Deny("This would change ccguard's hooks, gate or config. Those are the user's "
                    "to change.")
 

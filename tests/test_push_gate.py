@@ -213,13 +213,25 @@ def test_own_files_raw_check():
         os.symlink("/", os.path.join(repo.work, "root"))
     case("denied: write through a symlink that leads out of /tmp",
          f"ls {HOOKS}; echo x > {{work}}/root/var/x", 2, link_out_of_tmp)
-    # Reading them is not a write.
-    for cmd in (f"ls -la {HOOKS}/ 2>&1",
+    # Writers no list names, hidden by an exemption for `>`: any `>` stays a write.
+    for cmd in (f"git config --file {CONFIG} a.b c 2>/dev/null",
+                f"echo X | sort -o {CONFIG} 2>/dev/null",
+                f"echo hi | sed -n 'w {CONFIG}' >/dev/null",
+                f"mkdir {HOOKS}/evil 2>/dev/null",
+                f"link {CONFIG} /tmp/lk; echo x > /tmp/lk",
+                f"l\"\"n -s {CONFIG} /tmp/lk; echo x > /tmp/lk",
+                f"l\"\"n -s {CONFIG} /tmp/zz_lk1; echo x >/tmp/zz_lk1>&1",
+                # Known false positives: a read that carries a redirect. Use the Read tool,
+                # or drop the redirect.
+                f"ls -la {HOOKS}/ 2>&1",
                 f"ls {HOOKS} >/dev/null 2>&1 && echo present",
-                f"cat {CONFIG} > /tmp/copy.json",
-                f"cat {HOOKS}/pre-push 2>/dev/null | head -5",
+                f"cat {CONFIG} > /tmp/copy.json"):
+        case(f"denied: {cmd!r}", cmd, 2)
+    # Reading them without a redirect is not a write.
+    for cmd in (f"ls -la {HOOKS}/",
+                f"cat {HOOKS}/pre-push | head -5",
                 f"wc -l {HOOKS}/pre-push",
-                f"grep -n gate {HOOKS}/pre-push 2>&1 | head"):
+                f"grep -n gate {HOOKS}/pre-push | head"):
         case(f"allowed: {cmd!r}", cmd, 0)
 
 
