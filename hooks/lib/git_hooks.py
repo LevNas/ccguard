@@ -9,10 +9,12 @@ does not switch existing hooks off. `pre-push` additionally runs the ccguard
 gate (pre_push_gate.py) when CLAUDECODE=1.
 
 The content is fixed, so it can be compared instead of guessing from command
-text whether something wrote to it. The one variable part is the gate path
-in `pre-push`: the plugin version that wrote the file puts its own path
-there, and two sessions on different versions rewrite it back and forth.
-Any installed ccguard gate is accepted there.
+text whether something wrote to it. Nothing but this version's own text is
+accepted: push-gate.py rewrites any difference before every Bash command.
+The gate path in `pre-push` is the one part that differs in normal use (two
+sessions on different plugin versions, or one run with --plugin-dir, each
+write their own), so a difference there alone is rewritten without being
+reported; it is never trusted.
 """
 
 import os
@@ -60,57 +62,52 @@ fi
 exit 0
 """
 
-# pre-push with the gate path left open; the two occurrences must agree.
+# pre-push with another gate path: an absolute path of plain characters, the
+# same in both places. Used only to decide whether to report a rewrite.
 _head, _middle, _tail = PRE_PUSH.split("{gate}")
-PRE_PUSH_ANY_GATE = re.compile(
-    re.escape(_head) + r'([^"\n]+)' + re.escape(_middle) + r"\1" + re.escape(_tail))
-PLUGIN_CACHE = os.path.join(
-    os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude"),
-    "plugins", "cache")
-# <marketplace>/ccguard/<version>/hooks/pre_push_gate.py under the plugin cache
-INSTALLED_GATE = re.compile(r"[^/]+/ccguard/[^/]+/hooks/pre_push_gate\.py")
+PRE_PUSH_OTHER_GATE = re.compile(
+    re.escape(_head) + r"(/[A-Za-z0-9_.+/-]+)" + re.escape(_middle) + r"\1" + re.escape(_tail))
 
 
 def expected(name, gate=GATE):
     return PRE_PUSH.format(gate=gate) if name == "pre-push" else PASS_THROUGH.format(name=name)
 
 
-def gate_ok(gate):
-    """This version's gate, or the gate of another installed ccguard version that exists."""
-    real = os.path.realpath(gate)
-    if real == os.path.realpath(GATE):
-        return True
-    rel = os.path.relpath(real, os.path.realpath(PLUGIN_CACHE))
-    return (not rel.startswith("..") and bool(INSTALLED_GATE.fullmatch(rel.replace(os.sep, "/")))
-            and os.path.isfile(real))
-
-
-def intact(name, text):
-    if name != "pre-push":
-        return text == expected(name)
-    m = PRE_PUSH_ANY_GATE.fullmatch(text)
-    return bool(m) and gate_ok(m.group(1))
+def _read(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
 
 
 def changed(target=TARGET):
-    """Names of hooks that differ from what ccguard writes, are missing or not executable.
+    """Names of hooks that differ from this version's text, are missing or not executable.
 
-    Empty when the directory does not exist: nothing was installed yet, and
-    the SessionStart hook reports that case.
+    Every hook when the directory itself is missing: the SessionStart hook
+    creates it, and git silently runs no hook for a hooksPath that does not
+    exist. Anything that cannot be read or compared counts as changed.
     """
     if not os.path.isdir(target):
-        return []
+        return list(HOOK_NAMES)
     found = []
     for name in HOOK_NAMES:
         path = os.path.join(target, name)
         try:
-            with open(path, encoding="utf-8") as f:
-                ok = intact(name, f.read()) and os.access(path, os.X_OK)
-        except (OSError, UnicodeDecodeError):
+            ok = _read(path) == expected(name) and os.access(path, os.X_OK)
+        except Exception:  # noqa: BLE001 - unreadable is changed
             ok = False
         if not ok:
             found.append(name)
     return found
+
+
+def only_gate_path(name, target=TARGET):
+    """True for a pre-push that differs only in the gate path (another version, a dev dir)."""
+    if name != "pre-push":
+        return False
+    path = os.path.join(target, name)
+    try:
+        return bool(PRE_PUSH_OTHER_GATE.fullmatch(_read(path))) and os.access(path, os.X_OK)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def write_if_changed(path, text):

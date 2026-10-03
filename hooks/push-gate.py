@@ -11,12 +11,14 @@ gate runs:
   only when it is 1) or the environment around git, overriding HOME /
   XDG_CONFIG_HOME / GIT_CONFIG_* around a push, `git send-pack`, a push
   through sudo, and writes to the ccguard config or plugin;
-- before every Bash command, compares the ccguard git hooks with what
-  ccguard writes (lib/git_hooks.py); when they differ, restores them and
-  denies that one command. A command that pushes and may also write to the
-  hooks is denied, since the restore runs before it. What remains open is
-  a change to the hooks and a push this parser does not recognise, in one
-  command;
+- before every Bash command, rewrites the ccguard git hooks where they
+  differ from this version's text (lib/git_hooks.py), and denies that one
+  command unless the only difference was the gate path in pre-push. A push
+  is denied while the hooks are not in place (could not be restored, or the
+  directory is gone), and so is a command that pushes and shows any sign of
+  writing to the hooks, since the restore runs before it. What remains open
+  is a change to the hooks, written without naming them, and a push in the
+  same command;
 - denies a git push from a repository where core.hooksPath does not point
   at the ccguard hooks directory (not set yet, or the repository sets its
   own).
@@ -85,7 +87,8 @@ CONFIG_ENV = re.compile(r"\b(HOME|XDG_CONFIG_HOME|GIT_CONFIG_GLOBAL|GIT_CONFIG_S
 TEXT_PROTECTED = re.compile(r"ccguard/push-gate\.json|\.config/ccguard(?![\w.-])|"
                             r"plugins/cache/[^/\s]+/ccguard/")
 PROTECTED_PATHS = re.compile(TEXT_PROTECTED.pattern + r"|ccguard/git-hooks")
-HOOKS_PATH = re.compile(r"ccguard/git-hooks")
+# Any sign of the hooks directory, also when reached by `cd` or a variable.
+HOOKS_HINT = re.compile(r"git-hooks|share/ccguard|XDG_DATA_HOME")
 # Any `>` counts as a write next to a protected path. That rule also covers writers no
 # list names (`git config --file`, `sort -o`, `sed w`, ...); every exemption tried for it
 # (`2>&1`, `/dev/null`, `/tmp` targets) let such writers through in review. The words
@@ -307,6 +310,12 @@ def check_git_config(args):
 
 def check_gate_active(dirs):
     target = os.path.realpath(GIT_HOOKS)
+    if dirs:
+        missing = git_hooks.changed()
+        if missing:
+            raise Deny(f"ccguard's git hooks in {GIT_HOOKS} are not in place "
+                       f"({', '.join(missing)}), so the pre-push gate may not run. Ask the "
+                       "user to check that directory and start a new session.")
     for d in dict.fromkeys(dirs):
         if not os.path.isdir(d) or git_out(d, "rev-parse", "--is-inside-work-tree") is None:
             continue
@@ -491,30 +500,34 @@ def check_hooks_write(command, pushes):
     """A push in the same command as a possible write to the hooks: the restore before
     the command cannot see that write, so the text decides, as for the config."""
     joined = command.replace("\\\n", "")
-    if pushes and HOOKS_PATH.search(joined) and WRITES.search(joined):
+    if pushes and HOOKS_HINT.search(joined) and WRITES.search(joined):
         raise Deny("This pushes in the same command as it may change ccguard's git hooks. "
                    "Run the push as a separate command, without touching the hooks.")
 
 
 def restore_hooks():
-    """Put back ccguard's git hooks if they differ from what ccguard writes.
+    """Rewrite ccguard's git hooks where they differ from this version's text.
 
     Runs before every Bash command, so a change made by one command is undone
-    before the next one, which might push, can run.
+    before the next one, which might push, can run. Nothing else is trusted:
+    a pre-push that differs only in its gate path (another plugin version, a
+    --plugin-dir session) is rewritten too, without a report. Any other
+    difference is reported by denying this one command. When the hooks cannot
+    be restored, other commands go on and check_gate_active denies pushes.
     """
     names = git_hooks.changed()
     if not names:
         return
-    listed = ", ".join(names)
+    reported = [n for n in names if not git_hooks.only_gate_path(n)]
     try:
         git_hooks.install(names=names)
-    except OSError as e:
-        raise Deny(f"ccguard's git hooks in {git_hooks.TARGET} were changed ({listed}) and "
-                   f"could not be restored ({e.__class__.__name__}). Ask the user to start "
-                   "a new session.") from None
-    raise Deny(f"ccguard's git hooks were changed ({listed}) and have been restored; they "
-               "are the user's to change. Run the command again if it was not meant to "
-               "change them.")
+    except OSError:
+        return
+    if git_hooks.changed() or not reported:
+        return
+    raise Deny(f"ccguard's git hooks were changed ({', '.join(reported)}) and have been "
+               "restored; they are the user's to change. Run the command again if it was "
+               "not meant to change them.")
 
 
 def check(command, cwd, depth=0):
@@ -583,7 +596,7 @@ def main():
     except Deny as denial:
         print(f"BLOCKED (ccguard push-gate): {denial}", file=sys.stderr)
         return 2
-    except Exception:  # noqa: BLE001 - the text checks below still run
+    except Exception:  # noqa: BLE001 - a push is still checked by check_gate_active
         pass
     if not relevant(command):
         return 0

@@ -7,23 +7,28 @@ All notable changes to this project will be documented in this file.
 The git hooks are protected by their content instead of by command text (#2).
 
 ### Changed
-- **push-gate: the hooks directory is compared with its content before every Bash
+- **push-gate: the hooks are rewritten to this version's text before every Bash
   command.** The hooks are fixed text, so ccguard compares the 23 hooks with what it
-  writes; when one differs, is missing or is not executable, it restores them and denies
-  that one command, naming the hooks. A change made by one command is undone before the
-  next one, which might push, runs, however the change was written: through `cd` and a
-  relative name, a path split across words, or a writer no list names. `pre-push` names
-  the gate of the plugin version that wrote it; the gate of any ccguard version still in
-  the plugin cache is accepted, so sessions on two versions do not deny each other.
+  writes and rewrites any that differ, are missing or are not executable, the directory
+  included. A change made by one command is undone before the next one, which might
+  push, runs, however the change was written: through `cd` and a relative name, a path
+  split across words, or a writer no list names. The command is denied once, naming the
+  hooks, unless the only difference was the gate path in `pre-push`: sessions on two
+  plugin versions, or one run with `--plugin-dir`, each write their own, so that is
+  rewritten without a report. No other gate path is trusted.
+- **push-gate: a push is denied while the hooks are not in place**, for instance when
+  they cannot be rewritten (a read-only directory). Other commands go on, so a broken
+  hooks directory does not block the Bash tool.
 - **push-gate: the text check no longer covers the hooks directory**, except for a
-  command that pushes and may also write to the hooks: the restore runs before the
+  command that pushes and shows any sign of the hooks directory (`git-hooks`,
+  `share/ccguard`, `XDG_DATA_HOME`) next to a write: the rewrite runs before the
   command, so that one is still judged by its text. Reads with a redirect
   (`ls <hooks dir> 2>&1`, a commit message in a heredoc that names the hooks path) are
   allowed. The config and the plugin keep the text check: they have no content to
   compare with, and a checksum would have to live where Claude can also write it.
 - `install_git_hooks.py` and `push-gate.py` share the hook templates in
-  `hooks/lib/git_hooks.py`. The templates are unchanged, so hooks written by 0.2.x are
-  not treated as changed.
+  `hooks/lib/git_hooks.py`. The templates are unchanged; hooks written by 0.2.x differ
+  only in the gate path, so the first command after the upgrade rewrites them quietly.
 
 ### Fixed
 - **push-gate: `cd` into the config directory and a relative name went through**
@@ -37,8 +42,12 @@ The git hooks are protected by their content instead of by command text (#2).
   allowed, and nothing is newly denied.
 
 ### Known
-- A change to the hooks and a push the parser does not recognise, in one command, still
-  goes through. The guard stops mistakes of a cooperating agent; it is not a sandbox.
+- A change to the hooks written without naming them (a path built at run time) and a
+  push in the same command still go through, as does such a change with a push the
+  parser does not recognise. The guard stops mistakes of a cooperating agent; it is not
+  a sandbox.
+- The plugin cache is protected by its text only, so `cd` into it and a relative name
+  goes through, as in 0.2.1. No gate path is trusted, so this does not reach the hooks.
 - Reading the config or the plugin with a redirect is still denied, as in 0.2.1.
 
 ## [0.2.1] - 2026-10-03

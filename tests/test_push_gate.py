@@ -17,6 +17,7 @@ import sys
 import tempfile
 
 HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "hooks", "push-gate.py")
+INSTALL = os.path.join(os.path.dirname(HOOK), "install_git_hooks.py")
 TOKEN = "gh" + "p_" + "A" * 36
 FAILURES = []
 
@@ -47,6 +48,8 @@ class Repo:
         self.git(base, "init", "-q", "--bare", self.remote)
         self.git(base, "init", "-q", self.work)
         self.git(self.work, "remote", "add", "origin", self.remote)
+        # as the SessionStart hook does
+        subprocess.run([sys.executable, INSTALL], capture_output=True, env=self.env(), check=True)
 
     def env(self):
         env = dict(os.environ, XDG_DATA_HOME=self.data, XDG_CONFIG_HOME=self.config_home,
@@ -228,30 +231,33 @@ def test_own_files_raw_check():
 
 # ------------------------------------------------------------ the git hooks
 
-INSTALL = os.path.join(os.path.dirname(HOOK), "install_git_hooks.py")
-
-
-def install_hooks(repo):
-    subprocess.run([sys.executable, INSTALL], capture_output=True, env=repo.env(), check=True)
-
-
 def hook_path(repo, name="pre-push"):
     return os.path.join(repo.hooks_dir, name)
 
 
-def with_hooks(command, expected, change=None, label=None, env=None):
-    """Install the hooks, apply `change`, run `command`; return the repository's base."""
+def read(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def set_gate(repo, gate):
+    text = read(hook_path(repo))
+    mine = text.split('[ ! -f "', 1)[1].split('"', 1)[0]
+    with open(hook_path(repo), "w", encoding="utf-8") as f:
+        f.write(text.replace(mine, gate))
+
+
+def with_hooks(command, expected, change=None, label=None, after=None):
+    """Run `command` after `change` to the installed hooks; `after(repo, err)` checks more."""
     with tempfile.TemporaryDirectory() as base:
         repo = Repo(base)
-        install_hooks(repo)
         if change:
             change(repo)
-        if env:
-            repo.env = (lambda e=repo.env(): dict(e, **env))
         rc, err = repo.run(command)
         check(label or f"{'allowed' if expected == 0 else 'denied'}: {command!r}",
               rc == expected, (rc, err))
-        return repo, rc, err
+        if after:
+            after(repo, err)
 
 
 def test_hooks_reads_allowed():
@@ -262,8 +268,6 @@ def test_hooks_reads_allowed():
                 f"cat {HOOKS}/pre-push | head -5",
                 f"grep -n gate {HOOKS}/pre-push 2>/dev/null"):
         with_hooks(cmd, 0)
-    # No hooks directory yet: nothing to compare, nothing denied.
-    case("allowed: no hooks directory", "git status", 0)
 
 
 def test_hooks_changed_are_restored():
@@ -277,45 +281,68 @@ def test_hooks_changed_are_restored():
     def no_exec(repo):
         os.chmod(hook_path(repo), 0o644)
 
-    def other_gate(repo):
-        with open(hook_path(repo), encoding="utf-8") as f:
-            text = f.read()
-        gate = text.split('[ ! -f "', 1)[1].split('"', 1)[0]
-        with open(hook_path(repo), "w", encoding="utf-8") as f:
-            f.write(text.replace(gate, "/tmp/evil/plugins/cache/m/ccguard/9/hooks/pre_push_gate.py"))
+    def remove_dir(repo):
+        for name in os.listdir(repo.hooks_dir):
+            os.remove(hook_path(repo, name))
+        os.rmdir(repo.hooks_dir)
+
+    def shell_in_gate(repo):
+        set_gate(repo, "/x/$(touch /tmp/ccguard-test)/../pre_push_gate.py")
 
     for label, change, name in (("appended to", append, "pre-push"),
                                 ("removed", remove, "pre-commit"),
                                 ("made not executable", no_exec, "pre-push"),
-                                ("pointed at a gate outside the plugin cache", other_gate,
+                                ("directory removed", remove_dir, "pre-commit"),
+                                ("gate path with a command substitution", shell_in_gate,
                                  "pre-push")):
-        repo, rc, err = with_hooks("git status", 2, change, f"denied once: a hook {label}")
-        # restored: the same command now passes
-        rc2, err2 = repo.run("git status")
-        check(f"restored: a hook {label}", rc2 == 0 and name in err, (rc2, err, err2))
+        def restored(repo, err, name=name, label=label):
+            rc2, err2 = repo.run("git status")
+            check(f"restored: {label}", rc2 == 0 and name in err
+                  and read(hook_path(repo)) == read_expected(repo), (rc2, err, err2))
+        with_hooks("git status", 2, change, f"denied once: {label}", restored)
 
 
-def test_hooks_other_installed_version_accepted():
-    # Two sessions on different ccguard versions write their own gate path into pre-push;
-    # neither is a change. The other version must be installed in the plugin cache.
-    with tempfile.TemporaryDirectory() as claude:
-        gate = os.path.join(claude, "plugins", "cache", "mk", "ccguard", "0.1.9", "hooks",
-                            "pre_push_gate.py")
-        os.makedirs(os.path.dirname(gate))
-        open(gate, "w").close()
+def read_expected(repo):
+    with tempfile.TemporaryDirectory() as data:
+        subprocess.run([sys.executable, INSTALL], capture_output=True,
+                       env=dict(repo.env(), XDG_DATA_HOME=data), check=True)
+        return read(os.path.join(data, "ccguard", "git-hooks", "pre-push"))
 
-        def older(repo):
-            with open(hook_path(repo), encoding="utf-8") as f:
-                text = f.read()
-            mine = text.split('[ ! -f "', 1)[1].split('"', 1)[0]
-            with open(hook_path(repo), "w", encoding="utf-8") as f:
-                f.write(text.replace(mine, gate))
 
-        with_hooks("git status", 0, older, "allowed: pre-push of another installed version",
-                   env={"CLAUDE_CONFIG_DIR": claude})
-        os.remove(gate)
-        with_hooks("git status", 2, older, "denied: pre-push of a version no longer installed",
-                   env={"CLAUDE_CONFIG_DIR": claude})
+def test_hooks_other_gate_path_rewritten_quietly():
+    # Two sessions on different ccguard versions, or one with --plugin-dir, write their own
+    # gate path into pre-push. That is rewritten to this version's gate, never trusted, and
+    # not reported.
+    for gate in ("/home/u/.claude/plugins/cache/mk/ccguard/0.1.9/hooks/pre_push_gate.py",
+                 "/home/u/src/ccguard/hooks/pre_push_gate.py",
+                 "/tmp/evil/pre_push_gate.py"):
+        def rewritten(repo, err):
+            check(f"rewritten: pre-push naming {gate}",
+                  read(hook_path(repo)) == read_expected(repo), err)
+        with_hooks("git status", 0, lambda r, g=gate: set_gate(r, g),
+                   f"allowed: pre-push naming {gate}", rewritten)
+
+
+def test_hooks_not_restorable_denies_only_pushes():
+    if os.geteuid() == 0:
+        return  # root writes through a read-only directory
+
+    def locked(repo):
+        with open(hook_path(repo), "a") as f:
+            f.write("exit 0\n")
+        os.chmod(repo.hooks_dir, 0o555)
+
+    def unlock(repo, err):
+        os.chmod(repo.hooks_dir, 0o755)
+
+    def push_denied(repo, err):
+        rc, err2 = repo.run("git push origin feat")
+        check("denied: push while the hooks cannot be restored",
+              rc == 2 and "not in place" in err2, (rc, err2))
+        unlock(repo, err)
+
+    with_hooks("git status", 0, locked, "allowed: other commands while the hooks cannot be "
+               "restored", push_denied)
 
 
 def test_hooks_write_with_push_denied():
@@ -323,7 +350,11 @@ def test_hooks_write_with_push_denied():
     # judged by its text, as for the config.
     for cmd in (f"rm -f {HOOKS}/pre-push; git push origin feat",
                 f"echo x >> {HOOKS}/pre-push && git push origin main",
-                f"bash -c 'touch {HOOKS}/pre-push; git push origin feat'"):
+                f"bash -c 'touch {HOOKS}/pre-push; git push origin feat'",
+                "cd ~/.local/share/ccguard && echo x > git-hooks/pre-push && cd - && "
+                "git push origin main",
+                "d=$XDG_DATA_HOME/ccguard; echo x > \"$d/git-hooks/pre-push\"; "
+                "git push origin main"):
         with_hooks(cmd, 2)
     with_hooks(f"ls {HOOKS}; git push origin main", 0)
 

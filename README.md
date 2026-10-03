@@ -69,11 +69,12 @@ and from the Edit/Write tools via `protect-files.py`). `bash -c`, `sh -c` and `e
 are checked like the command itself.
 
 The hooks directory is checked by its content instead of by command text: before every Bash
-command, ccguard compares the hooks with what it writes and, if any differs, is missing or
-is not executable, restores them and denies that one command, naming the hooks. Reading the
-directory, redirect included (`ls <hooks dir> 2>&1`), is not affected. A command that pushes
-and may also write to the hooks is denied by its text, since the restore runs before it.
-The `pre-push` hook of another installed ccguard version is not a change.
+command, ccguard rewrites any hook that differs from what it writes, is missing or is not
+executable, and denies that one command, naming the hooks. A `pre-push` that differs only
+in its gate path (a session on another plugin version) is rewritten without a report. A
+push is denied while the hooks are not in place. Reading the directory, redirect included
+(`ls <hooks dir> 2>&1`), is not affected. A command that pushes and may also write to the
+hooks is denied by its text, since the rewrite runs before it.
 
 **gh posts — PreToolUse.** gh has no hook, so the text it would post is checked before the
 command runs: titles, bodies, notes, comments and descriptions of
