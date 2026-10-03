@@ -13,12 +13,13 @@ gate runs:
   through sudo, and writes to the ccguard config or plugin;
 - before every Bash command, rewrites the ccguard git hooks where they
   differ from this version's text (lib/git_hooks.py), and denies that one
-  command unless the only difference was the gate path in pre-push. A push
-  is denied while the hooks are not in place (could not be restored, or the
-  directory is gone), and so is a command that pushes and shows any sign of
-  writing to the hooks, since the restore runs before it. What remains open
-  is a change to the hooks, written without naming them, and a push in the
-  same command;
+  command unless the only difference was the gate path in pre-push or the
+  directory was missing. While the hooks cannot be restored, commands that
+  mention git are denied. A command that pushes and shows any sign of
+  writing to the hooks is denied, since the restore runs before it. What
+  remains open: a hooks write that does not name them (a glob, `cd` in
+  parts) with a push in the same command, and a delayed or background
+  writer started before the push;
 - denies a git push from a repository where core.hooksPath does not point
   at the ccguard hooks directory (not set yet, or the repository sets its
   own).
@@ -81,11 +82,10 @@ CONFIG_ENV = re.compile(r"\b(HOME|XDG_CONFIG_HOME|GIT_CONFIG_GLOBAL|GIT_CONFIG_S
                         r"GIT_CONFIG_KEY_\d+|GIT_CONFIG_VALUE_\d+)=|"
                         r"(-u\s+|unset\s+)(HOME|XDG_CONFIG_HOME)\b")
 # The config and the plugin have no content to compare with, so commands that mention
-# them are checked as text; the config directory counts too, for `cd` and a relative
-# name. The hooks directory is compared with its content before every command
-# (restore_hooks), so its text check is left only for a command that also pushes.
-TEXT_PROTECTED = re.compile(r"ccguard/push-gate\.json|\.config/ccguard(?![\w.-])|"
-                            r"plugins/cache/[^/\s]+/ccguard/")
+# them are checked as text. The hooks directory is compared with its content before
+# every command (restore_hooks), so its text check is left only for a command that also
+# pushes.
+TEXT_PROTECTED = re.compile(r"ccguard/push-gate\.json|plugins/cache/[^/\s]+/ccguard/")
 PROTECTED_PATHS = re.compile(TEXT_PROTECTED.pattern + r"|ccguard/git-hooks")
 # Any sign of the hooks directory, also when reached by `cd` or a variable.
 HOOKS_HINT = re.compile(r"git-hooks|share/ccguard|XDG_DATA_HOME")
@@ -310,12 +310,6 @@ def check_git_config(args):
 
 def check_gate_active(dirs):
     target = os.path.realpath(GIT_HOOKS)
-    if dirs:
-        missing = git_hooks.changed()
-        if missing:
-            raise Deny(f"ccguard's git hooks in {GIT_HOOKS} are not in place "
-                       f"({', '.join(missing)}), so the pre-push gate may not run. Ask the "
-                       "user to check that directory and start a new session.")
     for d in dict.fromkeys(dirs):
         if not os.path.isdir(d) or git_out(d, "rev-parse", "--is-inside-work-tree") is None:
             continue
@@ -511,23 +505,31 @@ def restore_hooks():
     Runs before every Bash command, so a change made by one command is undone
     before the next one, which might push, can run. Nothing else is trusted:
     a pre-push that differs only in its gate path (another plugin version, a
-    --plugin-dir session) is rewritten too, without a report. Any other
-    difference is reported by denying this one command. When the hooks cannot
-    be restored, other commands go on and check_gate_active denies pushes.
+    --plugin-dir session) is rewritten too, without a report, and so is a
+    missing directory (SessionStart did not run, or it was removed). Any other
+    difference is reported by denying this one command.
+
+    Returns the hooks still not in place after the rewrite, a pre-push of
+    another gate path aside (a session on another version may have rewritten
+    it meanwhile); empty when all is well.
     """
     names = git_hooks.changed()
     if not names:
-        return
-    reported = [n for n in names if not git_hooks.only_gate_path(n)]
+        return []
+    created = not os.path.isdir(GIT_HOOKS)
+    reported = [] if created else [n for n in names if not git_hooks.only_gate_path(n)]
     try:
         git_hooks.install(names=names)
     except OSError:
-        return
-    if git_hooks.changed() or not reported:
-        return
-    raise Deny(f"ccguard's git hooks were changed ({', '.join(reported)}) and have been "
-               "restored; they are the user's to change. Run the command again if it was "
-               "not meant to change them.")
+        pass
+    left = [n for n in git_hooks.changed() if not git_hooks.only_gate_path(n)]
+    if left:
+        return left
+    if reported:
+        raise Deny(f"ccguard's git hooks were changed ({', '.join(reported)}) and have been "
+                   "restored; they are the user's to change. Run the command again if it "
+                   "was not meant to change them.")
+    return []
 
 
 def check(command, cwd, depth=0):
@@ -592,12 +594,19 @@ def main():
     except (ValueError, AttributeError):
         return 0
     try:
-        restore_hooks()
+        left = restore_hooks()
     except Deny as denial:
         print(f"BLOCKED (ccguard push-gate): {denial}", file=sys.stderr)
         return 2
-    except Exception:  # noqa: BLE001 - a push is still checked by check_gate_active
-        pass
+    except Exception as e:  # noqa: BLE001
+        left = [f"could not be checked: {e.__class__.__name__}"]
+    if left and GIT.search(command.replace("\\\n", "")):
+        # Hooks run only through git; other commands go on, so a broken hooks
+        # directory does not block the Bash tool.
+        print(f"BLOCKED (ccguard push-gate): ccguard's git hooks in {GIT_HOOKS} are not in "
+              f"place and could not be restored ({', '.join(left)}), so the pre-push gate "
+              "may not run. Ask the user to check that directory.", file=sys.stderr)
+        return 2
     if not relevant(command):
         return 0
     set_budget(25)

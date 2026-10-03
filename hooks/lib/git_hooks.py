@@ -62,11 +62,12 @@ fi
 exit 0
 """
 
-# pre-push with another gate path: an absolute path of plain characters, the
-# same in both places. Used only to decide whether to report a rewrite.
+# pre-push with another gate path: an absolute path the same in both places,
+# without the characters the shell expands inside double quotes. Used only to
+# decide whether to report a rewrite.
 _head, _middle, _tail = PRE_PUSH.split("{gate}")
 PRE_PUSH_OTHER_GATE = re.compile(
-    re.escape(_head) + r"(/[A-Za-z0-9_.+/-]+)" + re.escape(_middle) + r"\1" + re.escape(_tail))
+    re.escape(_head) + r'(/[^"$`\\\n]+)' + re.escape(_middle) + r"\1" + re.escape(_tail))
 
 
 def expected(name, gate=GATE):
@@ -118,10 +119,17 @@ def write_if_changed(path, text):
     except (OSError, UnicodeDecodeError):
         pass
     tmp = f"{path}.tmp{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.chmod(tmp, 0o755)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def install(target=TARGET, names=None):

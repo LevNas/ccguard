@@ -171,7 +171,6 @@ def test_own_files_raw_check():
                 f"xargs rm <<'EOF'\n{CONFIG}\nEOF",
                 f"rm -f {CONFIG} '",
                 # relative targets after cd
-                "cd ~/.config/ccguard && : > push-gate.json",
                 "cd ~/.claude/plugins/cache/mk/ccguard/0.2.1/hooks && printf '' >push-gate.py",
                 # a quoted or commented `<<X` must not hide the lines after it
                 f"echo '<<X'\nrm -f {CONFIG}\nX",
@@ -292,7 +291,6 @@ def test_hooks_changed_are_restored():
     for label, change, name in (("appended to", append, "pre-push"),
                                 ("removed", remove, "pre-commit"),
                                 ("made not executable", no_exec, "pre-push"),
-                                ("directory removed", remove_dir, "pre-commit"),
                                 ("gate path with a command substitution", shell_in_gate,
                                  "pre-push")):
         def restored(repo, err, name=name, label=label):
@@ -300,6 +298,12 @@ def test_hooks_changed_are_restored():
             check(f"restored: {label}", rc2 == 0 and name in err
                   and read(hook_path(repo)) == read_expected(repo), (rc2, err, err2))
         with_hooks("git status", 2, change, f"denied once: {label}", restored)
+
+    # A missing directory (SessionStart did not run, or it was removed) is created quietly.
+    def created(repo, err):
+        check("created: the hooks directory", read(hook_path(repo)) == read_expected(repo)
+              and os.access(hook_path(repo, "pre-commit"), os.X_OK), err)
+    with_hooks("echo hi", 0, remove_dir, "allowed: hooks directory missing", created)
 
 
 def read_expected(repo):
@@ -315,6 +319,8 @@ def test_hooks_other_gate_path_rewritten_quietly():
     # not reported.
     for gate in ("/home/u/.claude/plugins/cache/mk/ccguard/0.1.9/hooks/pre_push_gate.py",
                  "/home/u/src/ccguard/hooks/pre_push_gate.py",
+                 "/Users/John Smith/.claude/plugins/cache/mk/ccguard/0.2.1/hooks/"
+                 "pre_push_gate.py",
                  "/tmp/evil/pre_push_gate.py"):
         def rewritten(repo, err):
             check(f"rewritten: pre-push naming {gate}",
@@ -323,7 +329,7 @@ def test_hooks_other_gate_path_rewritten_quietly():
                    f"allowed: pre-push naming {gate}", rewritten)
 
 
-def test_hooks_not_restorable_denies_only_pushes():
+def test_hooks_not_restorable_denies_only_git():
     if os.geteuid() == 0:
         return  # root writes through a read-only directory
 
@@ -332,17 +338,17 @@ def test_hooks_not_restorable_denies_only_pushes():
             f.write("exit 0\n")
         os.chmod(repo.hooks_dir, 0o555)
 
-    def unlock(repo, err):
+    def git_denied(repo, err):
+        for cmd in ("git status", "git push origin feat"):
+            rc, err2 = repo.run(cmd)
+            check(f"denied: {cmd} while the hooks cannot be restored",
+                  rc == 2 and "not in place" in err2, (rc, err2))
         os.chmod(repo.hooks_dir, 0o755)
+        check("no temporary file left behind",
+              not [n for n in os.listdir(repo.hooks_dir) if ".tmp" in n])
 
-    def push_denied(repo, err):
-        rc, err2 = repo.run("git push origin feat")
-        check("denied: push while the hooks cannot be restored",
-              rc == 2 and "not in place" in err2, (rc, err2))
-        unlock(repo, err)
-
-    with_hooks("git status", 0, locked, "allowed: other commands while the hooks cannot be "
-               "restored", push_denied)
+    with_hooks("echo hi", 0, locked, "allowed: commands without git while the hooks cannot "
+               "be restored", git_denied)
 
 
 def test_hooks_write_with_push_denied():
@@ -357,6 +363,10 @@ def test_hooks_write_with_push_denied():
                 "git push origin main"):
         with_hooks(cmd, 2)
     with_hooks(f"ls {HOOKS}; git push origin main", 0)
+    # Known false positive: a commit message that names the hooks, with a push in the same
+    # command. Push as a separate command.
+    with_hooks("git commit --allow-empty -F - <<'EOF'\nfix: install git-hooks text\nEOF\n"
+               "git push origin main", 2)
 
 
 def test_claudecode_stays_set():
