@@ -1,7 +1,7 @@
 {
   "name": "ccguard",
   "description": "Deterministic guards for Claude Code: block git commits that carry AI/assistant attribution, and gate pushes (git pre-push: no force, deletions, tags or protected branches; no secrets or private identifiers) and gh posts.",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "author": {
     "name": "LevNas"
   },

@@ -64,9 +64,18 @@ resolutions of merge commits.
 **Keeping the gate in force — PreToolUse.** ccguard denies `--no-verify` on a git command,
 writing `core.hooksPath` (reading it is fine), clearing `CLAUDECODE` or the environment
 around git, overriding `HOME`, `XDG_CONFIG_HOME` or `GIT_CONFIG_*` around a push, a push
-through `sudo`, `git send-pack`, and writes to ccguard's hooks directory, config or plugin
-files (from Bash, and from the Edit/Write tools via `protect-files.py`). `bash -c`, `sh -c`
-and `eval` strings are checked like the command itself.
+through `sudo`, `git send-pack`, and writes to ccguard's config or plugin files (from Bash,
+and from the Edit/Write tools via `protect-files.py`). `bash -c`, `sh -c` and `eval` strings
+are checked like the command itself.
+
+The hooks directory is checked by its content instead of by command text: before every Bash
+command, ccguard rewrites any hook that differs from what it writes, is missing or is not
+executable, and denies that one command, naming the hooks. A `pre-push` that differs only
+in its gate path (a session on another plugin version) and a missing directory are
+rewritten without a report. While the hooks cannot be rewritten, commands that mention git
+are denied. Reading the directory, redirect included (`ls <hooks dir> 2>&1`), is not
+affected. A command that pushes and may also write to the hooks is denied by its text,
+since the rewrite runs before it; push as a separate command.
 
 **gh posts — PreToolUse.** gh has no hook, so the text it would post is checked before the
 command runs: titles, bodies, notes, comments and descriptions of

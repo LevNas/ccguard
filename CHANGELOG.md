@@ -2,6 +2,63 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-10-03
+
+The git hooks are protected by their content instead of by command text (#2).
+
+### Changed
+- **push-gate: the hooks are rewritten to this version's text before every Bash
+  command.** The hooks are fixed text, so ccguard compares the 23 hooks with what it
+  writes and rewrites any that differ, are missing or are not executable, the directory
+  included. A change made by one command is undone before the next one, which might
+  push, runs, however the change was written: through `cd` and a relative name, a path
+  split across words, or a writer no list names. The command is denied once, naming the
+  hooks, unless the only difference was the gate path in `pre-push` (sessions on two
+  plugin versions, or one run with `--plugin-dir`, each write their own) or the whole
+  directory was missing (SessionStart did not run); those are rewritten without a
+  report. No gate path is trusted.
+- **push-gate: while the hooks cannot be rewritten** (a read-only directory, a full
+  disk), commands that mention git are denied, saying so. Other commands go on, so a
+  broken hooks directory does not block the Bash tool.
+- **push-gate: the text check no longer covers the hooks directory**, except for a
+  command that pushes and shows any sign of the hooks directory (`git-hooks`,
+  `share/ccguard`, `XDG_DATA_HOME`) next to a write: the rewrite runs before the
+  command, so that one is still judged by its text. Reads with a redirect
+  (`ls <hooks dir> 2>&1`, a commit message in a heredoc that names the hooks path) are
+  allowed. The config and the plugin keep the text check: they have no content to
+  compare with, and a checksum would have to live where Claude can also write it.
+- `install_git_hooks.py` and `push-gate.py` share the hook templates in
+  `hooks/lib/git_hooks.py`. The templates are unchanged; hooks written by 0.2.x differ
+  only in the gate path, so the first command after the upgrade rewrites them quietly.
+
+### Verified
+- The command corpus of 0.2.1 (720 commands) run through 0.2.1 and this version: 149 are
+  newly allowed, all of them touching only the hooks directory without a push (the
+  writes among them are restored before the next command); nothing else is newly
+  allowed, and nothing is newly denied.
+
+### Known
+The guard stops mistakes of a cooperating agent; it is not a sandbox. Two review rounds
+found these, which need a deliberate attempt:
+- A hooks write that does not name the directory (a glob such as `cc*/git-*`, `cd` in
+  parts, a path built at run time) and a push in the same command go through, as does a
+  hooks write with a push the parser does not recognise.
+- A delayed or background writer started by one command (`(sleep 20; cp ...) &`) and a
+  push in a later one: the rewrite runs before each command, not during it. 0.2.1
+  denied the first command by its text.
+- While the hooks cannot be rewritten, only commands that mention git are denied, so a
+  push from a script or `make` target goes through. Other commands are left alone so
+  that a broken hooks directory does not block the Bash tool.
+- The config and the plugin cache are protected by their text only, so `cd` into them
+  and a relative name goes through, as in 0.2.1. No gate path is trusted, so the cache
+  does not reach the hooks. A `--plugin-dir` checkout is not protected at all.
+
+False positives that remain:
+- A command that pushes and also shows a sign of the hooks directory next to a write is
+  denied, including a commit message that names `git-hooks` in a heredoc
+  (`git commit -F - <<'EOF' ... EOF; git push`). Push as a separate command.
+- Reading the config or the plugin with a redirect is still denied, as in 0.2.1.
+
 ## [0.2.1] - 2026-10-03
 
 This release only tightens checks. Every command 0.2.0 denied is still denied (checked
