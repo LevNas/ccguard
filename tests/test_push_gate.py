@@ -350,6 +350,19 @@ def test_hooks_not_restorable_denies_only_git():
     with_hooks("echo hi", 0, locked, "allowed: commands without git while the hooks cannot "
                "be restored", git_denied)
 
+    # Another gate path is rewritten quietly only when the rewrite works; in a read-only
+    # directory it is not in place, so the push is denied.
+    def foreign_locked(repo):
+        set_gate(repo, "/tmp/evil/pre_push_gate.py")
+        os.chmod(repo.hooks_dir, 0o555)
+
+    def unlock(repo, err):
+        os.chmod(repo.hooks_dir, 0o755)
+        check("denial says not in place", "not in place" in err, err)
+
+    with_hooks("git push origin feat", 2, foreign_locked,
+               "denied: push with another gate path that cannot be rewritten", unlock)
+
 
 def test_hooks_write_with_push_denied():
     # The restore runs before the command, so a write and a push in one command is

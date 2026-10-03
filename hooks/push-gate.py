@@ -521,7 +521,8 @@ def restore_hooks():
     try:
         git_hooks.install(names=names)
     except OSError:
-        pass
+        # Not rewritten: nothing in place counts, a pre-push of another gate included.
+        return git_hooks.changed()
     left = [n for n in git_hooks.changed() if not git_hooks.only_gate_path(n)]
     if left:
         return left
