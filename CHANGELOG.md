@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1] - 2026-10-20
+
+### Changed
+- **pre-push: the message for a branch deletion says where the user can do it.** It
+  used to say only "Leave deletion to the user.", and Claude then told the user, three
+  times, to retry the command with `!` in Claude Code. A `!` command runs in the same
+  shell, inherits `CLAUDECODE=1` and is blocked too. The message now says to run it in
+  a terminal outside Claude Code or to delete the branch on the hosting site, and that
+  `!` is blocked as well. What the gate blocks is unchanged; the other messages are
+  unchanged.
+
 ## [0.3.0] - 2026-10-03
 
 The git hooks are protected by their content instead of by command text (#2).
