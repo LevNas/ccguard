@@ -67,7 +67,11 @@ def check(remote, url, lines):
             raise Deny(f"Unexpected pre-push input from git: {line[:80]!r}.")
         _local_ref, local_oid, remote_ref, remote_oid = fields
         if set(local_oid) <= ZERO:
-            raise Deny(f"This push deletes `{remote_ref}`. Leave deletion to the user.")
+            # Claude has told the user to retry with `!` three times; `!` inherits CLAUDECODE=1.
+            raise Deny(f"This push deletes `{remote_ref}`. Leave deletion to the user: ask them to "
+                       "run it in a terminal outside Claude Code or to delete the branch on the "
+                       "hosting site. A command typed with `!` in Claude Code runs in this same "
+                       "shell and is blocked too.")
         if remote_ref.startswith("refs/tags/"):
             raise Deny(f"This push creates or moves the tag `{remote_ref[10:]}`, which publishes "
                        "a release. Leave tags to the release step (with push.followTags, push "

@@ -193,7 +193,10 @@ def test_rewrites_tags_deletions_denied():
                 "git push origin +feat/x"):
         case(f"denied: {cmd}", cmd, False, amended)
     for cmd in ("git push origin :feat/x", "git push --delete origin feat/x"):
-        case(f"denied: {cmd}", cmd, False, steps(add("a.txt", "ok\n"), published))
+        err = case(f"denied: {cmd}", cmd, False, steps(add("a.txt", "ok\n"), published))
+        # The user cannot do it with `!` either (it inherits CLAUDECODE=1); the message says where to.
+        check(f"deletion message names the way out: {cmd}",
+              "outside Claude Code" in err and "`!`" in err and "blocked too" in err, err)
     case("denied: a tag", "git push origin v1", False,
          lambda r: r.git(r.work, "tag", "v1"))
     case("denied: --tags", "git push --tags origin", False,
